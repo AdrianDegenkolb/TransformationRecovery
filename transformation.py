@@ -51,16 +51,16 @@ class RigidTransformation(Transformation):
         t = np.random.randn(3) * t_scale
         return cls(Q, t, noise_std)
 
-    def compose_with_inverse(self, other: RigidTransformation) -> RigidTransformation:
-        """Return self ∘ other⁻¹, i.e. f(p) = R2 @ (R1ᵀ @ (p − t1)) + t2.
+    def inverse(self) -> RigidTransformation:
+        """Return the inverse transformation: R⁻¹ = Rᵀ, t⁻¹ = −Rᵀ @ t."""
+        R_inv = self.R.T
+        t_inv = -(R_inv @ self.t)
+        return RigidTransformation(R_inv, t_inv)
 
-        Useful for computing ground-truth: if P = T1(S) and Q = T2(S), the
-        ideal map from P to Q is T2 ∘ T1⁻¹.
-        """
-        R_inv = other.R.T
-        t_inv = -(R_inv @ other.t)
-        R_out = self.R @ R_inv
-        t_out = self.R @ t_inv + self.t
+    def compose(self, other: RigidTransformation) -> RigidTransformation:
+        """Return self ∘ other, i.e. f(p) = R_self @ (R_other @ p + t_other) + t_self."""
+        R_out = self.R @ other.R
+        t_out = self.R @ other.t + self.t
         return RigidTransformation(R_out, t_out)
 
     def __repr__(self) -> str:
