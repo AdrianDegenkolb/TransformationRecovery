@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from abc import abstractmethod
+
 import numpy as np
 import torch
 import torch.nn as nn
 from scipy.spatial import KDTree
+from tqdm import tqdm
 
 from point_cloud import PointCloud
 from transformation import Transformation, RigidTransformation
@@ -29,7 +32,7 @@ def _rotation_to_six_d(R: np.ndarray) -> np.ndarray:
 
 
 class ElasticTransformation(Transformation):
-    """f(p) = R @ p + t + u(p), fitted by minimising the objective from
+    """f(p) = R @ p + t + u(p), fitted by minimizing the objective from
     Transformation Recovery: data term + magnitude penalty on u + graph-Laplacian
     smoothness on u.
     """
@@ -62,21 +65,29 @@ class ElasticTransformation(Transformation):
         k_neighbors: int = 10,
         sigma: float | None = None,
         verbose: bool = True,
-        log_every: int = 200,
     ) -> ElasticTransformation:
         """Fit f: p1 → p2 by gradient descent (Adam).
 
         Args:
-            lambda1: weight of the per-point magnitude penalty on u.
-            lambda2: weight of the graph-Laplacian smoothness penalty on u.
-            k_neighbors: neighbourhood size for the Laplacian graph.
-            sigma: Gaussian kernel bandwidth; defaults to median NN distance.
+            p1:          Source PointCloud (N, 3).
+            p2:          Target PointCloud (N, 3).
+            lambda1:     Weight of the per-point magnitude penalty on u.
+            lambda2:     Weight of the graph-Laplacian smoothness penalty on u.
+            n_iter:      Number of Adam optimization steps.
+            lr:          Adam learning rate.
+            k_neighbors: Neighbourhood size for the Laplacian graph.
+            sigma:       Gaussian kernel bandwidth for edge weights;
+                         defaults to the median nearest-neighbor distance.
+            verbose:     Show tqdm progress bar with live loss values if True.
+
+        Returns:
+            Fitted ElasticTransformation mapping p1 onto p2.
         """
         pts1 = torch.tensor(p1.points, dtype=torch.float64)
         pts2 = torch.tensor(p2.points, dtype=torch.float64)
         N = len(pts1)
 
-        # --- Neighbour graph for the Laplacian regulariser ---
+        # --- Neighbor graph for the Laplacian regulariser ---
         tree = KDTree(p1.points)
         dist, idx = tree.query(p1.points, k=k_neighbors + 1)
         dist, idx = dist[:, 1:], idx[:, 1:]   # drop self
@@ -88,7 +99,7 @@ class ElasticTransformation(Transformation):
         w_t = torch.tensor(weights, dtype=torch.float64)
         idx_t = torch.tensor(idx, dtype=torch.long)
 
-        # --- Initialise from rigid alignment ---
+        # --- Initialize from rigid alignment ---
         rigid = RigidTransformation.fit(p1, p2)
         six_d = nn.Parameter(torch.tensor(_rotation_to_six_d(rigid.R), dtype=torch.float64))
         t_param = nn.Parameter(torch.tensor(rigid.t, dtype=torch.float64))
@@ -96,7 +107,8 @@ class ElasticTransformation(Transformation):
 
         optimizer = torch.optim.Adam([six_d, t_param, u_param], lr=lr)
 
-        for it in range(n_iter):
+        pbar = tqdm(range(n_iter), desc="ElasticFit", disable=not verbose)
+        for it in pbar:
             optimizer.zero_grad()
 
             R = _six_d_to_rotation(six_d)                   # (3, 3)
@@ -114,13 +126,12 @@ class ElasticTransformation(Transformation):
             loss.backward()
             optimizer.step()
 
-            if verbose and (it + 1) % log_every == 0:
-                print(
-                    f"  iter {it+1:4d} | loss={loss.item():.5f}"
-                    f" | data={data_loss.item():.5f}"
-                    f" | u_mag={magnitude_loss.item():.5f}"
-                    f" | reg={reg_loss.item():.5f}"
-                )
+            pbar.set_postfix(
+                loss=f"{loss.item():.5f}",
+                data=f"{data_loss.item():.5f}",
+                u_mag=f"{magnitude_loss.item():.5f}",
+                reg=f"{reg_loss.item():.5f}",
+            )
 
         R_np = _six_d_to_rotation(six_d).detach().numpy()
         t_np = t_param.detach().numpy()
