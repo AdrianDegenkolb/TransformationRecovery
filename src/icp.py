@@ -96,10 +96,6 @@ class ICPResult:
         return tabulate(rows, tablefmt="rounded_outline")
 
 
-# ---------------------------------------------------------------------------
-# ICP
-# ---------------------------------------------------------------------------
-
 class ICP:
     """EM algorithm for rigid point cloud registration without known correspondences.
 
