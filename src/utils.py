@@ -6,20 +6,6 @@ import numpy as np
 from point_cloud import PointCloud
 
 
-def rotation_angle_error(R1: np.ndarray, R2: np.ndarray) -> float:
-    """Angular distance between two rotation matrices in degrees.
-
-    Args:
-        R1: SO(3) matrix (3, 3).
-        R2: SO(3) matrix (3, 3).
-
-    Returns:
-        Angle in degrees between R1 and R2.
-    """
-    cos = np.clip((np.trace(R1.T @ R2) - 1) / 2, -1.0, 1.0)
-    return float(np.degrees(np.arccos(cos)))
-
-
 def plot_point_clouds_xy(
     ax: matplotlib.axes.Axes,
     clouds: list[PointCloud],

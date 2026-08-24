@@ -1,11 +1,13 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 import numpy as np
 from tqdm import tqdm
 from tabulate import tabulate
 
+from algebra_utils import sample_uniform_rotations
 from point_cloud import PointCloud
 from transformation import RigidTransformation
 from matcher import Matcher, Matching, NearestNeighborMatcher, GaussianMatcher
@@ -187,3 +189,118 @@ class ICP:
             mean_residuals=mean_residuals, cloud_history=cloud_history, matching_history=matching_history,
             transform_history=transform_history
         )
+
+
+@dataclass
+class MultiICPResult:
+    """Result of a multi-start ICP run.
+
+    Attributes:
+        best:                   ICPResult with the lowest final residual.
+        best_initial_rotation:  The SO(3) seed that produced the best result.
+        all_results:            ICPResult for every starting rotation.
+        all_initial_rotations:  All sampled starting rotations (3, 3) each.
+    """
+
+    best: ICPResult
+    best_initial_rotation: np.ndarray
+    all_results: list[ICPResult]
+    all_initial_rotations: list[np.ndarray]
+
+    def __repr__(self) -> str:
+        rows = [
+            ["Starts",    len(self.all_results)],
+            ["Converged", sum(r.converged for r in self.all_results)],
+            ["Best",      self.best],
+        ]
+        return tabulate(rows, tablefmt="rounded_outline")
+
+
+class MultiStartICP:
+    """Runs ICP from multiple random starting rotations and returns the best result.
+
+    Wraps an existing ICP instance. For each start, the source cloud is
+    pre-rotated by a uniformly sampled SO(3) rotation before running ICP.
+    The recovered transformations are composed with the initial rotation so
+    that all results refer to the original (un-rotated) source.
+
+    Trials are executed in parallel via ProcessPoolExecutor.
+    """
+
+    def __init__(
+        self,
+        icp: ICP,
+        n_starts: int = 20,
+        n_jobs: int = -1,
+        seed: int | None = None,
+    ):
+        """
+        Args:
+            icp:      Configured ICP instance reused across all trials.
+            n_starts: Number of random starting rotations to try.
+            n_jobs:   Worker processes. -1 uses os.cpu_count().
+            seed:     Optional random seed for reproducible rotation sampling.
+        """
+        self.icp = icp
+        self.n_starts = n_starts
+        self.n_jobs = n_jobs
+        self.seed = seed
+
+    def fit(self, source: PointCloud, target: PointCloud) -> MultiICPResult:
+        """Run ICP from n_starts random rotations and return the best result.
+
+        Args:
+            source: Source PointCloud (N, 3).
+            target: Target PointCloud (M, 3).
+
+        Returns:
+            MultiICPResult containing the best ICPResult and all trial results.
+        """
+        rng = np.random.default_rng(self.seed)
+        rotations = sample_uniform_rotations(self.n_starts, rng=rng)
+
+        all_results: list[ICPResult] = []
+        all_rotations: list[np.ndarray] = []
+
+        max_workers = self.n_jobs if self.n_jobs > 0 else None
+        with ProcessPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(self._run_single, self.icp, source, target, R): R
+                for R in rotations
+            }
+            for future in as_completed(futures):
+                result, R_init = future.result()
+                all_results.append(result)
+                all_rotations.append(R_init)
+
+        best_idx = int(np.argmin([r.mean_residuals[-1] for r in all_results]))
+        return MultiICPResult(
+            best=all_results[best_idx],
+            best_initial_rotation=all_rotations[best_idx],
+            all_results=all_results,
+            all_initial_rotations=all_rotations,
+        )
+
+    @staticmethod
+    def _run_single(
+            icp: ICP,
+            source: PointCloud,
+            target: PointCloud,
+            R_init: np.ndarray,
+    ) -> tuple[ICPResult, np.ndarray]:
+        """Run one ICP trial from a pre-rotation R_init and compose the result.
+
+        Args:
+            icp:    Configured ICP instance.
+            source: Original source PointCloud.
+            target: Target PointCloud.
+            R_init: (3, 3) initial rotation applied to source before ICP.
+
+        Returns:
+            Tuple of (ICPResult with composed transformation, R_init).
+        """
+        init_tf = RigidTransformation(R_init, np.zeros(3))
+        rotated_source = init_tf.apply(source)
+        result = icp.fit(rotated_source, target)
+        result.transformation = result.transformation.compose(init_tf)
+        return result, R_init

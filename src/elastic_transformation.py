@@ -9,26 +9,8 @@ from scipy.spatial import KDTree
 from tqdm import tqdm
 
 from point_cloud import PointCloud
+from algebra_utils import six_d_to_rotation, rotation_to_six_d
 from transformation import Transformation, RigidTransformation
-
-
-def _six_d_to_rotation(six_d: torch.Tensor) -> torch.Tensor:
-    """6D representation → SO(3) via Gram-Schmidt (Zhou et al., 2019).
-
-    six_d: (6,) = [a1 | a2], where a1, a2 are the first two columns of R.
-    Returns R as a (3, 3) column-stacked orthonormal matrix.
-    """
-    a1, a2 = six_d[:3], six_d[3:]
-    b1 = a1 / a1.norm()
-    b2 = a2 - (b1 @ a2) * b1
-    b2 = b2 / b2.norm()
-    b3 = torch.linalg.cross(b1, b2)
-    return torch.stack([b1, b2, b3], dim=1)  # columns → (3, 3)
-
-
-def _rotation_to_six_d(R: np.ndarray) -> np.ndarray:
-    """Extract the 6D seed from a rotation matrix (first two columns, row-major)."""
-    return R[:, :2].T.reshape(-1).astype(np.float64)
 
 
 class ElasticTransformation(Transformation):
@@ -101,7 +83,7 @@ class ElasticTransformation(Transformation):
 
         # --- Initialize from rigid alignment ---
         rigid = RigidTransformation.fit(p1, p2)
-        six_d = nn.Parameter(torch.tensor(_rotation_to_six_d(rigid.R), dtype=torch.float64))
+        six_d = nn.Parameter(torch.tensor(rotation_to_six_d(rigid.R), dtype=torch.float64))
         t_param = nn.Parameter(torch.tensor(rigid.t, dtype=torch.float64))
         u_param = nn.Parameter(torch.zeros(N, 3, dtype=torch.float64))
 
@@ -111,7 +93,7 @@ class ElasticTransformation(Transformation):
         for it in pbar:
             optimizer.zero_grad()
 
-            R = _six_d_to_rotation(six_d)                   # (3, 3)
+            R = six_d_to_rotation(six_d)                   # (3, 3)
             pred = pts1 @ R.T + t_param + u_param           # (N, 3)
 
             data_loss = ((pred - pts2) ** 2).sum(dim=-1).mean()
@@ -133,7 +115,7 @@ class ElasticTransformation(Transformation):
                 reg=f"{reg_loss.item():.5f}",
             )
 
-        R_np = _six_d_to_rotation(six_d).detach().numpy()
+        R_np = six_d_to_rotation(six_d).detach().numpy()
         t_np = t_param.detach().numpy()
         u_np = u_param.detach().numpy()
         return cls(R_np, t_np, u_np, p1.points.copy())
