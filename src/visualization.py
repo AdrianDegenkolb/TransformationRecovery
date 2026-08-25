@@ -336,10 +336,6 @@ class ErrorMetricsVisualizer:
             ax.set_xticks(list(x))
 
 
-# ---------------------------------------------------------------------------
-# ResidualVisualizer
-# ---------------------------------------------------------------------------
-
 class ResidualVisualizer:
     """Visualisation methods for residual field analysis and rotation recovery."""
 

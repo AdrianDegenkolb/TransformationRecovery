@@ -80,10 +80,19 @@ class SyntheticExperiment:
 
         return SyntheticExperiment(S=S, T1=T1, T2=T2, P=P, Q=Q, T_gt=T_gt)
 
+    def observe_point_clouds(self, dropout_prob: float) -> tuple[PointCloud, PointCloud]:
+        """
+        Returns the point clouds P and Q but omits individual points with probability dropout probability.
 
-# ---------------------------------------------------------------------------
-# Cloud generators
-# ---------------------------------------------------------------------------
+        Args:
+            dropout_prob: The probability to miss individual points in the observation
+        Returns:
+            tuple containing observed and incomplete point clouds P and Q
+        """
+        indices_for_P = np.random.choice([True, False], size=len(self.P), replace=True, p=[1 - dropout_prob, dropout_prob])
+        indices_for_Q = np.random.choice([True, False], size=len(self.Q), replace=True, p=[1 - dropout_prob, dropout_prob])
+        return PointCloud(self.P.points[indices_for_P]), PointCloud(self.Q.points[indices_for_Q])
+
 
 def _make_cloud(n: int, style: CloudStyle) -> np.ndarray:
     """Dispatch to the appropriate cloud generator.
@@ -119,7 +128,7 @@ def _random_cloud(n: int) -> np.ndarray:
 def _clustered_cloud(n: int, n_clusters: int = 8, cluster_std: float = 4.0) -> np.ndarray:
     """Dense Gaussian clusters with centres spread across [-20, 20]^3.
 
-    Points are distributed evenly across clusters.  Because cluster centres
+    Points are distributed evenly across clusters.  Because cluster centers
     are placed far apart relative to the intra-cluster spread, each cluster
     acts as a distinct geometric anchor that breaks rotational symmetry.
 
