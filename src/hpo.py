@@ -5,6 +5,7 @@ from typing import Callable
 import numpy as np
 import optuna
 
+from feature_extractor import GeometricFeatureExtractor
 from icp import ICP, SigmaAnnealingCallback
 from matcher import NearestNeighborMatcher, GaussianMatcher
 from synthetic import SyntheticExperiment, CloudStyle
@@ -19,11 +20,16 @@ def build_icp_factory(
     """Suggest hyperparameters from trial and return a factory for fresh ICP instances.
 
     Tuned parameters:
-        matching:     categorical ['hard', 'soft']
-        sigma_init:   log-uniform [1.0, 50.0]         (soft only)
-        sigma_ratio:  log-uniform [0.01, 0.5]          (soft only); sigma_final = sigma_init * sigma_ratio
-        anneal_steps: int [50, max_iter]               (soft only)
-        k:            int [5, 30]                      (soft only)
+        matching:      categorical ['hard', 'soft']
+        sigma_init:    log-uniform [1.0, 50.0]          (soft only)
+        sigma_ratio:   log-uniform [0.01, 0.5]          (soft only); sigma_final = sigma_init * sigma_ratio
+        anneal_steps:  int [50, max_iter]               (soft only)
+        k:             int [5, 30]                      (soft only)
+        feature_extractor: categorical ['none', 'geometric']  (soft only)
+        fe_k:          int [2, 50]  neighborhood size   (geometric extractor only)
+        feature_mode:  categorical ['additive', 'append']     (geometric extractor only)
+        alpha:         float [0.0, 10.0]                (additive mode only)
+        beta:          float [0.0, 10.0]                (append mode only)
 
     Calling trial.suggest_* is idempotent within a trial, so the returned factory
     can be called multiple times (once per seed) and will always produce consistent
@@ -42,6 +48,22 @@ def build_icp_factory(
     if matching == "hard":
         return lambda: ICP(matcher=NearestNeighborMatcher(), max_iter=max_iter, tol=tol)
 
+    # Feature extractor defaults (used when feature_extractor == 'none')
+    feature_extractor = None
+    feature_mode = 'additive'
+    alpha = 1.0
+    beta = 1.0
+
+    feature_extractor_name = trial.suggest_categorical("feature_extractor", ["none", "geometric"])
+    if feature_extractor_name == "geometric":
+        fe_k = trial.suggest_int("fe_k", low=2, high=50)
+        feature_extractor = GeometricFeatureExtractor(fe_k)
+        feature_mode = trial.suggest_categorical("feature_mode", ["additive", "append"])
+        if feature_mode == "additive":
+            alpha = trial.suggest_float("alpha", low=0.0, high=10.0)
+        else:
+            beta = trial.suggest_float("beta", low=0.0, high=10.0)
+
     sigma_init = trial.suggest_float("sigma_init", 1.0, 50.0, log=True)
     sigma_ratio = trial.suggest_float("sigma_ratio", 0.01, 0.5, log=True)
     sigma_final = sigma_init * sigma_ratio
@@ -50,7 +72,8 @@ def build_icp_factory(
     trial.set_user_attr("sigma_final", sigma_final)
 
     def factory() -> ICP:
-        matcher = GaussianMatcher(sigma=sigma_init, k=k)
+        matcher = GaussianMatcher(sigma=sigma_init, k=k, feature_extractor=feature_extractor,
+                                  feature_mode=feature_mode, alpha=alpha, beta=beta)
         annealer = SigmaAnnealingCallback(matcher, sigma_init, sigma_final, anneal_steps)
         return ICP(matcher=matcher, max_iter=max_iter, tol=tol, callbacks=[annealer])
 

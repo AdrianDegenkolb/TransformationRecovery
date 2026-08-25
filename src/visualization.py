@@ -8,12 +8,15 @@ Provides four static-method classes:
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 import numpy as np
 from matplotlib.axes import Axes
 
+from algebra_utils import rotation_angle_error
+from icp import ICPResult
 from point_cloud import PointCloud
+from transformation import RigidTransformation
 
 _DEFAULT_COLORS: list[str] = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red', 'tab:purple']
 
@@ -193,6 +196,70 @@ class ErrorMetricsVisualizer:
         axes[2].set_xlabel(x_label)
         axes[2].set_ylabel('Mean residual')
         axes[2].set_title('Mean residuals')
+
+    @staticmethod
+    def plot_convergence_shaded(
+        axes: Sequence[Axes],
+        results_per_method: Iterable[list[ICPResult]],
+        ground_truths_per_method: Iterable[list[RigidTransformation]],
+        method_labels: Iterable[str],
+        colors: list[str] | None = None,
+        x_label: str = 'Iteration',
+    ) -> None:
+        """Plot per-iteration error trajectories as mean ± 1 std shaded bands.
+
+        Rotation and translation errors are derived from each ICPResult's
+        ``transform_history`` against the corresponding ground-truth transformation.
+        Variable-length trajectories (from early convergence) are padded by repeating
+        the final value.
+
+        Args:
+            axes:                     Sequence of 3 Axes: rotation error, translation error, residuals.
+            results_per_method:       Iterable of per-seed ICPResult lists, one per method. [[seed 1, ...], [seed 1, ...], ...]
+            ground_truths_per_method: Iterable of per-seed ground-truth RigidTransformation lists,
+                                      matching the structure of ``results_per_method``.
+            method_labels:            Legend label per method.
+            colors:                   Line/fill color per method. Defaults to tab palette.
+            x_label:                  Shared x-axis label.
+        """
+        methods = list(zip(results_per_method, ground_truths_per_method, method_labels))
+        if colors is None:
+            colors = _DEFAULT_COLORS[:len(methods)]
+
+        _YLABELS = ['Rotation error (°)', 'Translation error', 'Mean residual']
+        _TITLES  = ['Rotation error vs. ground truth', 'Translation error vs. ground truth', 'Mean residuals']
+
+        for (results, ground_truths, label), color in zip(methods, colors):
+            rot_trajs, t_trajs, res_trajs = [], [], []
+            for result, T_gt in zip(results, ground_truths):
+                rot_trajs.append([rotation_angle_error(T_gt.R, T.R) for T in result.transform_history])
+                t_trajs.append([float(np.linalg.norm(T_gt.t - T.t)) for T in result.transform_history])
+                res_trajs.append(result.mean_residuals)
+
+            max_len = max(len(t) for t in rot_trajs)
+
+            def _pad(trajs: list[list[float]], length: int) -> np.ndarray:
+                """Pad trajectories to ``length`` by repeating the last value; returns (n_seeds, length)."""
+                return np.array([t + [t[-1]] * (length - len(t)) for t in trajs])
+
+            arrays = [
+                _pad(rot_trajs, max_len).T,  # (max_len, n_seeds)
+                _pad(t_trajs,   max_len).T,
+                _pad(res_trajs, max_len).T,
+            ]
+
+            iters = np.arange(max_len)
+            for ax, arr in zip(axes, arrays):
+                mean = arr.mean(axis=1)
+                std  = arr.std(axis=1)
+                ax.plot(iters, mean, color=color, label=label, linewidth=2)
+                ax.fill_between(iters, mean - std, mean + std, alpha=0.25, color=color)
+
+        for ax, ylabel, title in zip(axes, _YLABELS, _TITLES):
+            ax.set_xlabel(x_label)
+            ax.set_ylabel(ylabel)
+            ax.set_title(title)
+            ax.legend()
 
     @staticmethod
     def plot_seed_boxplots(

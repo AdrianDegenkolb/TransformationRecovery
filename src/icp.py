@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import time
 from abc import ABC, abstractmethod
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -72,15 +74,17 @@ class ICPResult:
     Attributes:
         transformation:      Accumulated rigid transformation mapping source onto target.
         n_iterations:        Number of EM iterations performed.
+        duration_s:          Duration in seconds until convergence or n_iterations reached.
         converged:           Whether the algorithm converged before max_iter.
         mean_residuals:      Mean point-to-point residual after each M-step.
         cloud_history:       Source cloud state at the start of each iteration.
-        matching_history:  Matching from the E-step of each iteration.
+        matching_history:    Matching from the E-step of each iteration.
         transform_history:   Accumulated transformation after each M-step.
     """
 
     transformation: RigidTransformation
     n_iterations: int
+    duration_s: float
     converged: bool
     mean_residuals: list[float] = field(default_factory=list)
     cloud_history: list[PointCloud] = field(default_factory=list)
@@ -150,6 +154,7 @@ class ICP:
         matching_history: list[Matching] = []
         transform_history: list[RigidTransformation] = []
 
+        t0 = time.perf_counter()
         pbar = tqdm(range(self.max_iter), desc="ICP", disable=not self.verbose)
         for i in pbar:
             for cb in self.callbacks:
@@ -176,14 +181,14 @@ class ICP:
                 return ICPResult(
                     transformation=accumulated, n_iterations=i + 1, converged=True,
                     mean_residuals=mean_residuals, cloud_history=cloud_history, matching_history=matching_history,
-                    transform_history=transform_history
+                    transform_history=transform_history, duration_s=time.perf_counter() - t0
                 )
 
         pbar.set_description("ICP did not converge")
         return ICPResult(
             transformation=accumulated, n_iterations=self.max_iter, converged=False,
             mean_residuals=mean_residuals, cloud_history=cloud_history, matching_history=matching_history,
-            transform_history=transform_history
+            transform_history=transform_history, duration_s=time.perf_counter() - t0
         )
 
 
@@ -196,12 +201,14 @@ class MultiICPResult:
         best_initial_rotation:  The SO(3) seed that produced the best result.
         all_results:            ICPResult for every starting rotation.
         all_initial_rotations:  All sampled starting rotations (3, 3) each.
+        duration_s:             Duration in seconds until all workers convergence or reach n_iterations.
     """
 
     best: ICPResult
     best_initial_rotation: np.ndarray
     all_results: list[ICPResult]
     all_initial_rotations: list[np.ndarray]
+    duration_s: float
 
     def __repr__(self) -> str:
         rows = [
@@ -210,6 +217,18 @@ class MultiICPResult:
             ["Best",      self.best],
         ]
         return tabulate(rows, tablefmt="rounded_outline")
+
+    @property
+    def individual_durations_summed(self):
+        return sum([result.duration_s for result in self.all_results])
+
+    @property
+    def num_workers(self) -> int:
+        return len(self.all_results)
+
+    @property
+    def cpu_efficiency(self) -> float:
+        return self.individual_durations_summed / self.duration_s * self.num_workers
 
 
 class MultiStartICP:
@@ -259,6 +278,7 @@ class MultiStartICP:
         all_rotations: list[np.ndarray] = []
 
         max_workers = self.n_jobs if self.n_jobs > 0 else None
+        t0 = time.perf_counter()
         with ProcessPoolExecutor(max_workers=max_workers) as pool:
             futures = {
                 pool.submit(self._run_single, self.icp, source, target, R): R
@@ -268,6 +288,9 @@ class MultiStartICP:
                 result, R_init = future.result()
                 all_results.append(result)
                 all_rotations.append(R_init)
+                if result.converged and result.mean_residuals[-1] < 1e-3:
+                    pool.shutdown(cancel_futures=True)
+
 
         best_idx = int(np.argmin([r.mean_residuals[-1] for r in all_results]))
         return MultiICPResult(
@@ -275,6 +298,7 @@ class MultiStartICP:
             best_initial_rotation=all_rotations[best_idx],
             all_results=all_results,
             all_initial_rotations=all_rotations,
+            duration_s=time.perf_counter() - t0
         )
 
     @staticmethod
@@ -299,4 +323,5 @@ class MultiStartICP:
         rotated_source = init_tf.apply(source)
         result = icp.fit(rotated_source, target)
         result.transformation = result.transformation.compose(init_tf)
+        result.transform_history = [T.compose(init_tf) for T in result.transform_history]
         return result, R_init
