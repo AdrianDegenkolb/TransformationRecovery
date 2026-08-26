@@ -6,13 +6,13 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
 import numpy as np
-from tqdm import tqdm
 from tabulate import tabulate
+from tqdm import tqdm
 
 from algebra_utils import sample_uniform_rotations
+from matcher import Matcher, Matching, NearestNeighborMatcher, GaussianMatcher
 from point_cloud import PointCloud
 from transformation import RigidTransformation
-from matcher import Matcher, Matching, NearestNeighborMatcher, GaussianMatcher
 
 
 class ICPCallback(ABC):
@@ -80,6 +80,8 @@ class ICPResult:
         cloud_history:       Source cloud state at the start of each iteration.
         matching_history:    Matching from the E-step of each iteration.
         transform_history:   Accumulated transformation after each M-step.
+        deltas:              Per step delta. ICP is considered converged if
+                             delta = ||last_10_transformation.R - I||_F + ||last_10_transformation.t||_2 < tolerance
     """
 
     transformation: RigidTransformation
@@ -90,6 +92,7 @@ class ICPResult:
     cloud_history: list[PointCloud] = field(default_factory=list)
     matching_history: list[Matching] = field(default_factory=list)
     transform_history: list[RigidTransformation] = field(default_factory=list)
+    deltas: list[float] = field(default_factory=list)
 
     def __repr__(self):
         rows = [
@@ -107,8 +110,8 @@ class ICP:
     M-step: fit a RigidTransformation via weighted SVD Procrustes.
     Callbacks: called at the start of each iteration (e.g. for sigma annealing).
 
-    Convergence is declared when the step transformation is near identity:
-        ||R_step - I||_F + ||t_step|| < tol
+    Convergence is declared when the composed transformation of the last 10 steps is near identity:
+        delta = ||R_step - I||_F + ||t_step|| < tol
     """
 
     def __init__(
@@ -153,6 +156,7 @@ class ICP:
         cloud_history: list[PointCloud] = []
         matching_history: list[Matching] = []
         transform_history: list[RigidTransformation] = []
+        deltas: list[float] = []
 
         t0 = time.perf_counter()
         pbar = tqdm(range(self.max_iter), desc="ICP", disable=not self.verbose)
@@ -167,28 +171,37 @@ class ICP:
             accumulated = transformation.compose(accumulated)
             residual = float(transformation.residuals(src_pc, tgt_pc).mean())
 
+            # as an early stopping criteria consider the composition of the latest 10 transformation
+            # if this composition is close to the identity transformation we stop early
+            if len(transform_history) >= 10:
+                ref = transform_history[-10]
+                last_10_transformation = accumulated.compose(ref.inverse())
+            else:
+                last_10_transformation = accumulated
+
+            delta = np.linalg.norm(last_10_transformation.R - np.eye(3), ord="fro") + np.linalg.norm(last_10_transformation.t)
+
             pbar.set_postfix(residual=f"{residual:.4f}")
             cloud_history.append(current)
             matching_history.append(matching)
             mean_residuals.append(residual)
             transform_history.append(accumulated)
-
+            deltas.append(delta)
             current = transformation.apply(current)
 
-            delta = np.linalg.norm(transformation.R - np.eye(3), ord="fro") + np.linalg.norm(transformation.t)
             if delta < self.tol:
                 pbar.set_description("ICP converged")
                 return ICPResult(
                     transformation=accumulated, n_iterations=i + 1, converged=True,
                     mean_residuals=mean_residuals, cloud_history=cloud_history, matching_history=matching_history,
-                    transform_history=transform_history, duration_s=time.perf_counter() - t0
+                    transform_history=transform_history, duration_s=time.perf_counter() - t0, deltas=deltas
                 )
 
         pbar.set_description("ICP did not converge")
         return ICPResult(
             transformation=accumulated, n_iterations=self.max_iter, converged=False,
             mean_residuals=mean_residuals, cloud_history=cloud_history, matching_history=matching_history,
-            transform_history=transform_history, duration_s=time.perf_counter() - t0
+            transform_history=transform_history, duration_s=time.perf_counter() - t0, deltas=deltas
         )
 
 
