@@ -94,7 +94,7 @@ def rotation_to_six_d(R: np.ndarray) -> np.ndarray:
     return R[:, :2].T.reshape(-1).astype(np.float64)
 
 
-def rotation_angle_error(R1: np.ndarray, R2: np.ndarray) -> float:
+def rotation_angle(R1: np.ndarray, R2: np.ndarray) -> float:
     """Angular distance between two rotation matrices in degrees.
 
     Args:

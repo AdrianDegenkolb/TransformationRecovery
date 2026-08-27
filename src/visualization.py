@@ -2,7 +2,7 @@
 
 Provides four static-method classes:
     PointCloudVisualizer   — raw point cloud scatter/projection plots.
-    ErrorMetricsVisualizer — convergence curves, seed boxplots, parameter sweeps.
+    ErrorMetricsVisualizer — convergence curves, seed box plots, parameter sweeps.
     ResidualVisualizer     — histograms, field heatmaps, rotation bases.
     OptimizationVisualizer — HPO Pareto front and feature importance.
 """
@@ -13,18 +13,12 @@ from collections.abc import Iterable, Sequence
 import numpy as np
 from matplotlib.axes import Axes
 
-from algebra_utils import rotation_angle_error
+from algebra_utils import rotation_angle
 from icp import ICPResult
 from point_cloud import PointCloud
 from transformation import RigidTransformation
 
 _DEFAULT_COLORS: list[str] = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red', 'tab:purple']
-
-_PROJECTIONS: list[tuple[int, int, str, str, str]] = [
-    (0, 1, 'x', 'y', 'XY'),
-    (0, 2, 'x', 'z', 'XZ'),
-    (1, 2, 'y', 'z', 'YZ'),
-]
 
 # Common boxplot style used across all seed-distribution plots.
 _BOX_STYLE: dict[str, object] = dict(
@@ -41,6 +35,11 @@ _BOX_STYLE: dict[str, object] = dict(
 
 class PointCloudVisualizer:
     """Visualization methods for 3D point clouds."""
+    _PROJECTIONS: list[tuple[int, int, str, str, str]] = [
+        (0, 1, 'x', 'y', 'XY'),
+        (0, 2, 'x', 'z', 'XZ'),
+        (1, 2, 'y', 'z', 'YZ'),
+    ]
 
     @staticmethod
     def plot_xy(
@@ -84,7 +83,7 @@ class PointCloudVisualizer:
             alpha:      Scatter transparency.
         """
         pts = cloud.points
-        for ax, (i, j, xl, yl, title) in zip(axes, _PROJECTIONS):
+        for ax, (i, j, xl, yl, title) in zip(axes, PointCloudVisualizer._PROJECTIONS):
             ax.scatter(pts[:, i], pts[:, j], s=point_size, alpha=alpha, color=color)
             ax.set_xlabel(xl)
             ax.set_ylabel(yl)
@@ -364,7 +363,7 @@ class ResidualVisualizer:
             ax.hist(data, bins=bins, alpha=alpha, label=label, color=color)
         ax.set_xlabel('Point residual')
         ax.set_ylabel('Count')
-        ax.set_title('Point residuals')
+        ax.set_title('Point residuals P → Q')
         ax.legend()
 
     @staticmethod
@@ -391,12 +390,15 @@ class ResidualVisualizer:
         ax.set_ylabel('y')
         ax.set_title('Residual field |u| (XY projection)')
 
+class TransformationVisualizer:
+    """Visualization methods for transformations"""
+
     @staticmethod
     def plot_rotation_bases(
         ax: Axes,
         rotations: list[np.ndarray],
         labels: list[str],
-        colors: list[str],
+        colors: list[str]  | None = None,
         line_widths: list[float] | None = None,
     ) -> None:
         """Draw XY-projected basis vectors for one or more rotation matrices.
@@ -415,6 +417,9 @@ class ResidualVisualizer:
         """
         if line_widths is None:
             line_widths = [1.5] + [1.0] * (len(rotations) - 1)
+
+        if colors is None:
+            colors = _DEFAULT_COLORS[:len(rotations)]
 
         origin = np.zeros(2)
         for R, label, color, lw in zip(rotations, labels, colors, line_widths):
