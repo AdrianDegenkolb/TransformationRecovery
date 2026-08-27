@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod, ABCMeta
 
 import numpy as np
-import numpy._typing as npt
+from numpy.typing import NDArray
 
 from point_cloud import PointCloud
 
@@ -20,7 +20,7 @@ class Transformation(ABC, metaclass=ABCMeta):
         """
         ...
 
-    def residuals(self, p1: PointCloud, q2: PointCloud) -> npt.NDArray:
+    def residuals(self, p1: PointCloud, q2: PointCloud) -> NDArray[np.float64]:
         """
         Given two point clouds of identical size n returns an array of size n that contains the distance between
         f(p[i]) to q[i] in entry [i]
@@ -31,7 +31,7 @@ class Transformation(ABC, metaclass=ABCMeta):
 class RigidTransformation(Transformation):
     """f(p) = R @ p + t, optionally with additive Gaussian noise."""
 
-    def __init__(self, R: np.ndarray, t: np.ndarray, noise_std: float = 0.0):
+    def __init__(self, R: NDArray[np.float64], t: NDArray[np.float64], noise_std: float = 0.0):
         self.R = np.asarray(R, dtype=np.float64)          # (3, 3) in SO(3)
         self.t = np.asarray(t, dtype=np.float64)          # (3,)
         self.noise_std = noise_std
@@ -52,7 +52,7 @@ class RigidTransformation(Transformation):
         cls,
         p1: PointCloud,
         p2: PointCloud,
-        weights: np.ndarray | None = None,
+        weights: NDArray[np.float64] | None = None,
     ) -> RigidTransformation:
         """Weighted least-squares rigid alignment via SVD (Procrustes).
 

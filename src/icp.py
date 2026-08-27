@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import time
+from numpy.typing import NDArray
 from abc import ABC, abstractmethod
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from typing import Any, Optional
 
 import numpy as np
 from tabulate import tabulate
 from tqdm import tqdm
 
-from algebra_utils import sample_uniform_rotations
+from algebra_utils import rotation_angle, sample_uniform_rotations
 from matcher import Matcher, Matching, NearestNeighborMatcher, GaussianMatcher
 from point_cloud import PointCloud
+from synthetic import SyntheticExperiment
 from transformation import RigidTransformation
 
 
@@ -52,7 +55,7 @@ class SigmaAnnealingCallback(ICPCallback):
             sigma_init:   Starting bandwidth (large → soft/global).
             sigma_final:  Ending bandwidth (small → near-hard).
             anneal_steps: Number of iterations over which to anneal.
-                          Typically set equal to ICP max_iter.
+                          Typically, this is set equal to ICP max_iter.
         """
         self.matcher = matcher
         self.sigma_init = sigma_init
@@ -95,12 +98,122 @@ class ICPResult:
     deltas: list[float] = field(default_factory=list)
 
     def __repr__(self):
-        rows = [
-            ["Converged",  self.converged],
-            ["Iterations", self.n_iterations],
-            ["Recovered",  self.transformation],
+        rows: list[tuple[str, int | RigidTransformation]] = [
+            ("Converged",  self.converged),
+            ("Iterations", self.n_iterations),
+            ("Recovered",  self.transformation),
         ]
         return tabulate(rows, tablefmt="rounded_outline")
+
+@dataclass
+class MultiStartICPResult:
+    """Result of a multi-start ICP run.
+
+    Attributes:
+        best:                   ICPResult with the lowest final residual.
+        best_initial_rotation:  The SO(3) seed that produced the best result.
+        all_results:            ICPResult for every starting rotation.
+        all_initial_rotations:  All sampled starting rotations (3, 3) each.
+        duration_s:             Duration in seconds until all workers convergence or reach n_iterations.
+    """
+
+    best: ICPResult
+    best_initial_rotation: NDArray[np.float64]
+    all_results: list[ICPResult]
+    all_initial_rotations: list[NDArray[np.float64]]
+    duration_s: float
+
+    def __repr__(self) -> str:
+        rows: list[tuple[str, int | RigidTransformation]] = [
+            ("Starts",                  len(self.all_results)),
+            ("Converged",               sum(r.converged for r in self.all_results)),
+            ("Best Transformation",     self.best.transformation),
+        ]
+        return tabulate(rows, tablefmt="rounded_outline")
+
+    @property
+    def individual_durations_summed(self):
+        return sum([result.duration_s for result in self.all_results])
+
+    @property
+    def num_workers(self) -> int:
+        return len(self.all_results)
+
+    @property
+    def cpu_efficiency(self) -> float:
+        return self.individual_durations_summed / self.duration_s * self.num_workers
+
+    def __getattribute__(self, name: str):
+        # forward attribute access to the best result
+        if hasattr(self.best, name):
+            return getattr(self.best, name)
+        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+
+
+@dataclass
+class MultiSeedSyntheticICPResult:
+    """
+    Holds reference to a synthetic experiment and (MultiStart)ICPResult object each for a set of seeds.
+    """
+    r: dict[int, tuple[SyntheticExperiment, ICPResult | MultiStartICPResult]] = field(default_factory=dict)
+
+    def __getitem__(self, seed: int) -> Optional[tuple[SyntheticExperiment, ICPResult | MultiStartICPResult]]:
+        return self.r[seed] if seed in self.r else None
+
+    @property
+    def results(self) -> list[ICPResult | MultiStartICPResult]:
+        """
+        A list of (MultiStart)ICPResults, one per seed
+        """
+        return [t[1] for t in self.r.values()]
+
+    @property
+    def experiments(self) -> list[SyntheticExperiment]:
+        """
+        A list of SyntheticExperiments, one per seed
+        """
+        return [t[0] for t in self.r.values()]
+
+    @property
+    def ground_truths(self) -> list[RigidTransformation]:
+        """
+        A list of ground truth transformations, one per seed
+        """
+        return [t[0].T_gt for t in self.r.values()]
+
+    @property
+    def rotation_errors(self) -> list[float]:
+        """
+        A list of rotation errors, one per seed
+        """
+        return [rotation_angle(res.transformation.R, gt.R) for res, gt in zip(self.results, self.ground_truths)]
+
+    @property
+    def translation_errors(self) -> list[float]:
+        """
+        A list of translation errors, one per seed
+        """
+        return [float(np.linalg.norm(res.transformation.t - gt.t)) for res, gt in zip(self.results, self.ground_truths)]
+
+    @property
+    def residuals(self) -> list[NDArray[np.float64]]:
+        """
+        A list of residuals, one array per seed
+        """
+        acc: list[NDArray[np.float64]] = []
+        for exp, result in self.r.values():
+            q_pred = result.transformation.apply(exp.P)
+            nearest_matching = NearestNeighborMatcher().match(q_pred, exp.Q)
+            residual = np.linalg.norm(nearest_matching.source_points - nearest_matching.target_positions, axis=1)
+            acc.append(residual)
+        return acc
+
+    @property
+    def mean_residuals(self) -> list[float]:
+        """
+        A list of mean residual errors, one per seed
+        """
+        return [res.mean() for res in self.residuals]
 
 
 class ICP:
@@ -205,45 +318,6 @@ class ICP:
         )
 
 
-@dataclass
-class MultiICPResult:
-    """Result of a multi-start ICP run.
-
-    Attributes:
-        best:                   ICPResult with the lowest final residual.
-        best_initial_rotation:  The SO(3) seed that produced the best result.
-        all_results:            ICPResult for every starting rotation.
-        all_initial_rotations:  All sampled starting rotations (3, 3) each.
-        duration_s:             Duration in seconds until all workers convergence or reach n_iterations.
-    """
-
-    best: ICPResult
-    best_initial_rotation: np.ndarray
-    all_results: list[ICPResult]
-    all_initial_rotations: list[np.ndarray]
-    duration_s: float
-
-    def __repr__(self) -> str:
-        rows = [
-            ["Starts",    len(self.all_results)],
-            ["Converged", sum(r.converged for r in self.all_results)],
-            ["Best",      self.best],
-        ]
-        return tabulate(rows, tablefmt="rounded_outline")
-
-    @property
-    def individual_durations_summed(self):
-        return sum([result.duration_s for result in self.all_results])
-
-    @property
-    def num_workers(self) -> int:
-        return len(self.all_results)
-
-    @property
-    def cpu_efficiency(self) -> float:
-        return self.individual_durations_summed / self.duration_s * self.num_workers
-
-
 class MultiStartICP:
     """Runs ICP from multiple random starting rotations and returns the best result.
 
@@ -261,6 +335,7 @@ class MultiStartICP:
         n_starts: int = 20,
         n_jobs: int = -1,
         seed: int | None = None,
+        verbose: bool = True
     ):
         """
         Args:
@@ -273,8 +348,9 @@ class MultiStartICP:
         self.n_starts = n_starts
         self.n_jobs = n_jobs
         self.seed = seed
+        self.verbose = verbose
 
-    def fit(self, source: PointCloud, target: PointCloud) -> MultiICPResult:
+    def fit(self, source: PointCloud, target: PointCloud) -> MultiStartICPResult:
         """Run ICP from n_starts random rotations and return the best result.
 
         Args:
@@ -292,21 +368,23 @@ class MultiStartICP:
 
         max_workers = self.n_jobs if self.n_jobs > 0 else None
         t0 = time.perf_counter()
+        pbar = tqdm(total=self.n_starts, desc=f"Testing {self.n_starts} starting configurations", disable=not self.verbose)
         with ProcessPoolExecutor(max_workers=max_workers) as pool:
             futures = {
                 pool.submit(self._run_single, self.icp, source, target, R): R
                 for R in rotations
             }
             for future in as_completed(futures):
+                pbar.update(1)
                 result, R_init = future.result()
                 all_results.append(result)
                 all_rotations.append(R_init)
                 if result.converged and result.mean_residuals[-1] < 1e-3:
                     pool.shutdown(cancel_futures=True)
 
-
+        pbar.close()
         best_idx = int(np.argmin([r.mean_residuals[-1] for r in all_results]))
-        return MultiICPResult(
+        return MultiStartICPResult(
             best=all_results[best_idx],
             best_initial_rotation=all_rotations[best_idx],
             all_results=all_results,
@@ -338,3 +416,28 @@ class MultiStartICP:
         result.transformation = result.transformation.compose(init_tf)
         result.transform_history = [T.compose(init_tf) for T in result.transform_history]
         return result, R_init
+
+
+
+
+def fit_multi_seed(icp: ICP | MultiStartICP, seeds: list[int], verbose: bool = True, experiment_kwargs: dict[str, Any] | None = None) -> MultiSeedSyntheticICPResult:
+        """
+        Given a list of seeds and optional experiment kwargs generate an experiment per seed solve it and report the results
+        Args:
+            seeds: a list of seeds
+            verbose: prints seed progress if true
+            experiment_kwargs: a dictionary of arguments for the SyntheticExperiment.generate method
+        Return:
+            Result and Experiment per seed
+        """
+        results: dict[int, tuple[SyntheticExperiment, ICPResult | MultiStartICPResult]] = {}
+        experiment_kwargs = experiment_kwargs or {}
+        cache_verbose = icp.verbose
+        icp.verbose = False
+        for seed in tqdm(seeds, desc=f"Solving {len(seeds)} seeds", disable=not verbose):
+            exp = SyntheticExperiment.generate(**experiment_kwargs, seed=seed)
+            result = icp.fit(exp.P, exp.Q)
+            results[seed] = (exp, result)
+
+        icp.verbose = cache_verbose
+        return MultiSeedSyntheticICPResult(results)

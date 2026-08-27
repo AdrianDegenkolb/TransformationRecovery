@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
+from numpy.typing import NDArray
 from scipy.spatial import KDTree
 
 from point_cloud import PointCloud
@@ -23,9 +24,9 @@ class Matching:
                           derived from a geometrically close cluster of points have higher confidence. None = uniform.
     """
 
-    source_points: np.ndarray     # (N, 3)
-    target_positions: np.ndarray  # (N, 3)
-    weights: np.ndarray | None = None
+    source_points: NDArray[np.float64]     # (N, 3)
+    target_positions: NDArray[np.float64]  # (N, 3)
+    weights: NDArray[np.float64] | None = None
 
 
 class Matcher(ABC):

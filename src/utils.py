@@ -27,7 +27,7 @@ def get_error_metrics(
         ground_truth_transformation: RigidTransformation,
         p: PointCloud,
         q: PointCloud
-) -> tuple[float, float, NDArray]:
+) -> tuple[float, float, NDArray[np.float64]]:
     """
     Computes three basic error metrics for a transformation:
     1. **Rotation error vs ground truth**: How much do transformation and the ground truth transformation
@@ -49,7 +49,7 @@ def get_error_metrics(
         rotation error, translation error, per point residuals
     """
     rot_err = rotation_angle(ground_truth_transformation.R, transformation.R)
-    t_err = np.linalg.norm(ground_truth_transformation.t - transformation.t)
+    t_err = float(np.linalg.norm(ground_truth_transformation.t - transformation.t))
 
     q_pred = transformation.apply(p)
     nearest_matching = NearestNeighborMatcher().match(q_pred, q)

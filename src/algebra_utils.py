@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+from numpy.typing import NDArray
 
 
-def quaternion_to_rotation(q: np.ndarray) -> np.ndarray:
+def quaternion_to_rotation(q: NDArray[np.float64]) -> NDArray[np.float64]:
     """Convert a unit quaternion to a rotation matrix.
 
     Args:
@@ -28,7 +29,7 @@ def quaternion_to_rotation(q: np.ndarray) -> np.ndarray:
     ], dtype=np.float64)
 
 
-def sample_uniform_rotation(rng: np.random.Generator | None = None) -> np.ndarray:
+def sample_uniform_rotation(rng: np.random.Generator | None = None) -> NDArray[np.float64]:
     """
     Sample a rotation matrix uniformly from SO(3) via a random unit quaternion.
 
@@ -49,7 +50,7 @@ def sample_uniform_rotation(rng: np.random.Generator | None = None) -> np.ndarra
 def sample_uniform_rotations(
     n: int,
     rng: np.random.Generator | None = None,
-) -> list[np.ndarray]:
+) -> list[NDArray[np.float64]]:
     """
     Sample n rotation matrices uniformly from SO(3).
 
@@ -82,7 +83,7 @@ def six_d_to_rotation(six_d: torch.Tensor) -> torch.Tensor:
     return torch.stack([b1, b2, b3], dim=1)  # columns → (3, 3)
 
 
-def rotation_to_six_d(R: np.ndarray) -> np.ndarray:
+def rotation_to_six_d(R: NDArray[np.float64]) -> NDArray[np.float64]:
     """Extract the 6D seed from a rotation matrix (first two columns, row-major).
 
     Args:
@@ -94,7 +95,7 @@ def rotation_to_six_d(R: np.ndarray) -> np.ndarray:
     return R[:, :2].T.reshape(-1).astype(np.float64)
 
 
-def rotation_angle(R1: np.ndarray, R2: np.ndarray) -> float:
+def rotation_angle(R1: NDArray[np.float64], R2: NDArray[np.float64]) -> float:
     """Angular distance between two rotation matrices in degrees.
 
     Args:
