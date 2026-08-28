@@ -2,20 +2,20 @@ import numpy as np
 from numpy.typing import NDArray
 
 from algebra_utils import rotation_angle
-from icp import ICPResult
+from icp import ICPResult, MultiStartICPResult
 from matcher import NearestNeighborMatcher
 from point_cloud import PointCloud
 from transformation import RigidTransformation
 
 
-def convergence_ratio(ICP_results: list[ICPResult]) -> float:
+def convergence_ratio(ICP_results: list[ICPResult | MultiStartICPResult]) -> float:
     """
     Returns the fraction of runs that have converged to a solution.
     """
     return sum(r.converged for r in ICP_results) / len(ICP_results)
 
 
-def convergence_to_global_opt_ratio(ICP_results: list[ICPResult], tol: float = 1e-3) -> float:
+def convergence_to_global_opt_ratio(ICP_results: list[ICPResult | MultiStartICPResult], tol: float = 1e-3) -> float:
     """
     Returns the fraction of runs that have converged to the globally optimal solution. This is measured by small residual errors.
     """

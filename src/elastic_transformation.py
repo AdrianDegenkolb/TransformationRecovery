@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from abc import abstractmethod
-
 import numpy as np
+from numpy.typing import NDArray
 import torch
 import torch.nn as nn
 from scipy.spatial import KDTree
@@ -21,10 +20,10 @@ class ElasticTransformation(Transformation):
 
     def __init__(
         self,
-        R: np.ndarray,
-        t: np.ndarray,
-        u: np.ndarray,
-        source_points: np.ndarray,
+        R: NDArray[np.float64],
+        t: NDArray[np.float64],
+        u: NDArray[np.float64],
+        source_points: NDArray[np.float64],
     ):
         self.R = R                        # (3, 3)
         self.t = t                        # (3,)
@@ -90,7 +89,7 @@ class ElasticTransformation(Transformation):
         optimizer = torch.optim.Adam([six_d, t_param, u_param], lr=lr)
 
         pbar = tqdm(range(n_iter), desc="ElasticFit", disable=not verbose)
-        for it in pbar:
+        for _ in pbar:
             optimizer.zero_grad()
 
             R = six_d_to_rotation(six_d)                   # (3, 3)
@@ -115,7 +114,7 @@ class ElasticTransformation(Transformation):
                 reg=f"{reg_loss.item():.5f}",
             )
 
-        R_np = six_d_to_rotation(six_d).detach().numpy()
-        t_np = t_param.detach().numpy()
-        u_np = u_param.detach().numpy()
+        R_np: NDArray[np.float64] = six_d_to_rotation(six_d).detach().numpy()
+        t_np: NDArray[np.float64] = t_param.detach().numpy()
+        u_np: NDArray[np.float64] = u_param.detach().numpy()
         return cls(R_np, t_np, u_np, p1.points.copy())

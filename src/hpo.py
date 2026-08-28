@@ -9,7 +9,7 @@ from feature_extractor import GeometricFeatureExtractor
 from icp import ICP, SigmaAnnealingCallback
 from matcher import NearestNeighborMatcher, GaussianMatcher
 from synthetic import SyntheticExperiment, CloudStyle
-from algebra_utils import rotation_angle_error
+from algebra_utils import rotation_angle
 
 
 def build_icp_factory(
@@ -106,7 +106,7 @@ def evaluate_icp(
         exp = SyntheticExperiment.generate(**gen_kwargs, style=style, seed=seed)
         result = icp_factory().fit(exp.P, exp.Q)
         T = result.transformation
-        rot_errs.append(rotation_angle_error(exp.T_gt.R, T.R))
+        rot_errs.append(rotation_angle(exp.T_gt.R, T.R))
         t_errs.append(float(np.linalg.norm(exp.T_gt.t - T.t)))
 
     rot_arr, t_arr = np.array(rot_errs), np.array(t_errs)

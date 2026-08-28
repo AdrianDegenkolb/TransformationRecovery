@@ -143,7 +143,7 @@ class MultiStartICPResult:
     def cpu_efficiency(self) -> float:
         return self.individual_durations_summed / self.duration_s * self.num_workers
 
-    def __getattribute__(self, name: str):
+    def __getattr__(self, name: str):
         # forward attribute access to the best result
         if hasattr(self.best, name):
             return getattr(self.best, name)
@@ -214,6 +214,13 @@ class MultiSeedSyntheticICPResult:
         A list of mean residual errors, one per seed
         """
         return [res.mean() for res in self.residuals]
+
+    @property
+    def durations_s(self) -> list[float]:
+        """
+        A list of durations, one per seed
+        """
+        return [res.duration_s for res in self.results]
 
 
 class ICP:
@@ -292,7 +299,7 @@ class ICP:
             else:
                 last_10_transformation = accumulated
 
-            delta = np.linalg.norm(last_10_transformation.R - np.eye(3), ord="fro") + np.linalg.norm(last_10_transformation.t)
+            delta = float(np.linalg.norm(last_10_transformation.R - np.eye(3), ord="fro") + np.linalg.norm(last_10_transformation.t))
 
             pbar.set_postfix(residual=f"{residual:.4f}")
             cloud_history.append(current)
@@ -364,7 +371,7 @@ class MultiStartICP:
         rotations = sample_uniform_rotations(self.n_starts, rng=rng)
 
         all_results: list[ICPResult] = []
-        all_rotations: list[np.ndarray] = []
+        all_rotations: list[NDArray[np.float64]] = []
 
         max_workers = self.n_jobs if self.n_jobs > 0 else None
         t0 = time.perf_counter()
@@ -397,8 +404,8 @@ class MultiStartICP:
             icp: ICP,
             source: PointCloud,
             target: PointCloud,
-            R_init: np.ndarray,
-    ) -> tuple[ICPResult, np.ndarray]:
+            R_init: NDArray[np.float64],
+    ) -> tuple[ICPResult, NDArray[np.float64]]:
         """Run one ICP trial from a pre-rotation R_init and compose the result.
 
         Args:
@@ -420,11 +427,18 @@ class MultiStartICP:
 
 
 
-def fit_multi_seed(icp: ICP | MultiStartICP, seeds: list[int], verbose: bool = True, experiment_kwargs: dict[str, Any] | None = None) -> MultiSeedSyntheticICPResult:
+def fit_multi_seed(
+        icp: ICP | MultiStartICP, 
+        seeds: list[int],
+        dropout_prob: float = 0.0,
+        verbose: bool = True, 
+        experiment_kwargs: dict[str, Any] | None = None) -> MultiSeedSyntheticICPResult:
         """
         Given a list of seeds and optional experiment kwargs generate an experiment per seed solve it and report the results
         Args:
+            icp: ICP or MultiStartICP instance to use for fitting
             seeds: a list of seeds
+            dropout_prob: the probability to miss individual points in the observation
             verbose: prints seed progress if true
             experiment_kwargs: a dictionary of arguments for the SyntheticExperiment.generate method
         Return:
@@ -436,7 +450,8 @@ def fit_multi_seed(icp: ICP | MultiStartICP, seeds: list[int], verbose: bool = T
         icp.verbose = False
         for seed in tqdm(seeds, desc=f"Solving {len(seeds)} seeds", disable=not verbose):
             exp = SyntheticExperiment.generate(**experiment_kwargs, seed=seed)
-            result = icp.fit(exp.P, exp.Q)
+            p, q = exp.observe_point_clouds(dropout_prob)
+            result = icp.fit(p, q)
             results[seed] = (exp, result)
 
         icp.verbose = cache_verbose

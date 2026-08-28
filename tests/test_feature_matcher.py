@@ -3,7 +3,7 @@ import pytest
 
 from point_cloud import PointCloud
 from feature_extractor import IdentityFeatureExtractor
-from matcher import GaussianMatcher
+from matcher import GaussianMatcher, NearestNeighborMatcher
 
 
 @pytest.fixture
@@ -73,6 +73,38 @@ def test_append_mode_weights_by_joint_distance(small_cloud: PointCloud) -> None:
         atol=1e-6,
         err_msg="In append mode, joint-distance weighting must recover the self-match even with k>1.",
     )
+
+
+def test_nearest_neighbor_matcher_append_mode_recovers_correspondence(small_cloud: PointCloud) -> None:
+    """NearestNeighborMatcher in append mode picks candidates by joint (position,
+    feature) distance. With source == target, a slight positional offset makes the
+    plain spatial nearest neighbor ambiguous/wrong for close points, but the identity
+    feature term (scaled by a large beta) should still recover the true index-i match.
+    """
+    rng = np.random.default_rng(1)
+    target = PointCloud(small_cloud.points + rng.uniform(-0.05, 0.05, size=small_cloud.points.shape))
+
+    matcher = NearestNeighborMatcher(feature_extractor=IdentityFeatureExtractor(), beta=1000.0)
+    matching = matcher.match(small_cloud, target)
+
+    np.testing.assert_allclose(
+        matching.target_positions,
+        target.points,
+        atol=1e-6,
+        err_msg="With identity features and large beta, each point should map to its own index in target.",
+    )
+
+
+def test_nearest_neighbor_matcher_without_extractor_is_purely_spatial(small_cloud: PointCloud) -> None:
+    """feature_extractor=None must behave exactly like the original spatial-only matcher."""
+    target = PointCloud(small_cloud.points + 0.5)
+
+    matching = NearestNeighborMatcher().match(small_cloud, target)
+
+    expected_idx = np.argmin(
+        np.linalg.norm(small_cloud.points[:, None, :] - target.points[None, :, :], axis=2), axis=1
+    )
+    np.testing.assert_allclose(matching.target_positions, target.points[expected_idx], atol=1e-10)
 
 
 def test_alpha_zero_recovers_standard_gaussian(small_cloud: PointCloud) -> None:

@@ -175,7 +175,7 @@ class ErrorMetricsVisualizer:
             results_per_method, ground_truths_per_method, method_labels, colors
         ):
             trajectories = [
-                [rotation_angle(T_gt.R, T.R) for T in result.transform_history]
+                np.array([rotation_angle(T_gt.R, T.R) for T in result.transform_history])
                 for result, T_gt in zip(results, ground_truths)
             ]
             _plot_shaded_band(
@@ -213,7 +213,7 @@ class ErrorMetricsVisualizer:
             results_per_method, ground_truths_per_method, method_labels, colors
         ):
             trajectories = [
-                [float(np.linalg.norm(T_gt.t - T.t)) for T in result.transform_history]
+                np.array([float(np.linalg.norm(T_gt.t - T.t)) for T in result.transform_history])
                 for result, T_gt in zip(results, ground_truths)
             ]
             _plot_shaded_band(
@@ -489,6 +489,42 @@ class TransformationVisualizer:
         ax.grid(True, alpha=0.3)
 
 
+class TimeVisualizer:
+    """Visualisation methods for ICP runtime distributions."""
+
+    @staticmethod
+    def plot_duration_distribution(
+        ax: Axes,
+        durations_per_method: list[NDArray[np.float64]],
+        method_labels: list[str],
+        colors: list[str] | None = None,
+        unit: str = 's',
+    ) -> None:
+        """Box plot of wall-clock duration across seeds for each method.
+
+        Args:
+            ax:                   Axes to draw on.
+            durations_per_method: 1D array of per-seed durations per method.
+            method_labels:        Label per method (used as x-tick labels).
+            colors:               Box fill color per method. Defaults to tab palette.
+            unit:                 Time unit label shown on the y-axis (e.g. ``'s'`` or ``'ms'``).
+        """
+        if colors is None:
+            colors = _DEFAULT_COLORS[:len(durations_per_method)]
+
+        bp = ax.boxplot(
+            durations_per_method,
+            labels=method_labels,
+            **_BOX_STYLE,
+        )
+        for patch, color in zip(bp['boxes'], colors):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.6)
+
+        ax.set_ylabel(f'Duration ({unit})')
+        ax.set_title('Runtime distribution across seeds')
+
+
 class OptimizationVisualizer:
     """Visualisation methods for multi-objective hyperparameter optimization results."""
 
@@ -584,8 +620,10 @@ def _plot_hist(
     if method_colors is None:
         method_colors = _DEFAULT_COLORS[:len(data_per_method)]
     labels = method_labels or [None] * len(data_per_method)
+    all_data = np.concatenate(data_per_method)
+    bin_edges = np.linspace(all_data.min(), all_data.max(), bins + 1)
     for data, label, color in zip(data_per_method, labels, method_colors):
-        ax.hist(data, bins=bins, alpha=alpha, label=label, color=color)
+        ax.hist(data, bins=bin_edges, alpha=alpha, label=label, color=color)
     ax.set_xlabel(xlabel)
     ax.set_ylabel('Count')
     ax.set_title(title)
@@ -613,9 +651,12 @@ def _plot_shaded_band(
         title:   Axes title.
         x_label: X-axis label.
     """
-    def _pad_trajectories(t: list[list[float]], length: int) -> NDArray[np.float64]:
+    def _pad_trajectories(trajectories: list[NDArray[np.float64]], length: int) -> NDArray[np.float64]:
         """Pad variable-length trajectories to ``length`` by repeating the last value."""
-        return np.array([t + [t[-1]] * (length - len(t)) for t in t])
+        return np.array([
+            np.concatenate([traj, np.full(length - len(traj), traj[-1])])
+            for traj in trajectories
+        ])
 
     max_len = max(len(t) for t in trajectories)
     arr = np.array(_pad_trajectories(trajectories, max_len)).T

@@ -11,6 +11,72 @@ from point_cloud import PointCloud
 from feature_extractor import FeatureExtractor
 
 
+def _zscored_features(
+    feature_extractor: FeatureExtractor,
+    source: PointCloud,
+    target: PointCloud,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Compute z-scored feature matrices for source and target using target statistics.
+
+    Z-scoring uses target mean and std so that beta (append mode) and alpha (additive
+    mode) are interpretable regardless of the raw feature scale.
+
+    Args:
+        feature_extractor: Extractor producing a (N, D) feature matrix per cloud.
+        source: Source point cloud.
+        target: Target point cloud.
+
+    Returns:
+        Tuple (feat_src_z, feat_tgt_z), each of shape (N, D) and (M, D) respectively.
+    """
+    feat_src = feature_extractor.get_features(source)   # (N, D)
+    feat_tgt = feature_extractor.get_features(target)   # (M, D)
+    feat_mean = feat_tgt.mean(axis=0)
+    feat_std  = feat_tgt.std(axis=0) + 1e-8
+    return (feat_src - feat_mean) / feat_std, (feat_tgt - feat_mean) / feat_std
+
+
+def _joint_knn(
+    source_points: NDArray[np.float64],
+    target_points: NDArray[np.float64],
+    feat_src_z: NDArray[np.float64],
+    feat_tgt_z: NDArray[np.float64],
+    beta: float,
+    k: int,
+) -> tuple[NDArray[np.float64], NDArray[np.intp]]:
+    """Find k nearest neighbors in a joint (position, feature) space.
+
+    Positions are jointly z-scored across source and target; features (already
+    z-scored by the caller) are scaled by beta. Both are concatenated into one
+    vector per point before building the KDTree, so beta controls feature influence
+    relative to spatial distance.
+
+    Args:
+        source_points: (N, 3) source coordinates.
+        target_points: (M, 3) target coordinates.
+        feat_src_z:    (N, D) z-scored source features.
+        feat_tgt_z:    (M, D) z-scored target features.
+        beta:          Scale of feature dimensions relative to spatial coordinates.
+        k:             Number of neighbors to return per source point.
+
+    Returns:
+        Tuple (dists, nbr_idx), each of shape (N, k). Distances are rescaled back
+        to physical (spatial) units.
+    """
+    n = len(source_points)
+    all_pts  = np.vstack([source_points, target_points])
+    pos_mean = all_pts.mean()
+    pos_std  = all_pts.std() + 1e-8
+    pos_src_z = (source_points - pos_mean) / pos_std  # (N, 3)
+    pos_tar_z = (target_points - pos_mean) / pos_std  # (M, 3)
+
+    joint_src = np.hstack([pos_src_z, beta * feat_src_z])  # (N, 3+D)
+    joint_tgt = np.hstack([pos_tar_z, beta * feat_tgt_z])  # (M, 3+D)
+    dists, nbr_idx = KDTree(joint_tgt).query(joint_src, k=k)    # joint dist
+    dists *= pos_std                                            # rescale to physical units
+    return dists.reshape(n, k), nbr_idx.reshape(n, k)
+
+
 @dataclass
 class Matching:
     """Correspondence between a source and a target point cloud.
@@ -47,7 +113,31 @@ class Matcher(ABC):
 
 
 class NearestNeighborMatcher(Matcher):
-    """Hard E-step: each source point maps to its single nearest target point."""
+    """Hard E-step: each source point maps to its single nearest target point.
+
+    Optionally augmented with a FeatureExtractor in 'append' mode: feature vectors
+    (z-scored, scaled by ``beta``) are appended to 3D coordinates before the
+    nearest-neighbor search, so the single nearest neighbor is chosen jointly on
+    position and feature similarity — the hard-matching analog of GaussianMatcher's
+    'append' mode. There is no 'additive' analog here: additive mode perturbs
+    log-weights before a softmax over multiple candidates, which has no meaning
+    when only a single nearest neighbor is kept.
+    """
+
+    def __init__(
+        self,
+        feature_extractor: FeatureExtractor | None = None,
+        beta: float = 1.0,
+    ) -> None:
+        """
+        Args:
+            feature_extractor: Optional extractor producing a (N, D) feature matrix per
+                               cloud. When None, falls back to purely spatial matching.
+            beta:              Scale of feature dimensions relative to spatial coordinates
+                               in the joint KDTree. Only used when feature_extractor is set.
+        """
+        self.feature_extractor = feature_extractor
+        self.beta = beta
 
     def match(self, source: PointCloud, target: PointCloud) -> Matching:
         """Assign each source point to its nearest neighbor in target.
@@ -59,8 +149,15 @@ class NearestNeighborMatcher(Matcher):
         Returns:
             Matching that assigns a target_point to each source point with uniform weights.
         """
-        tree = KDTree(target.points)
-        _, nn_indices = tree.query(source.points)
+        if self.feature_extractor is not None:
+            feat_src_z, feat_tgt_z = _zscored_features(self.feature_extractor, source, target)
+            _, nbr_idx = _joint_knn(
+                source.points, target.points, feat_src_z, feat_tgt_z, self.beta, k=1,
+            )
+            nn_indices = nbr_idx[:, 0]
+        else:
+            tree = KDTree(target.points)
+            _, nn_indices = tree.query(source.points)
         return Matching(
             source_points=source.points,
             target_positions=target.points[nn_indices],
@@ -119,29 +216,6 @@ class GaussianMatcher(Matcher):
         self.alpha = alpha
         self.beta = beta
 
-    def _zscored_features(
-        self,
-        source: PointCloud,
-        target: PointCloud,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Compute z-scored feature matrices for source and target using target statistics.
-
-        Z-scoring uses target mean and std so that beta (append mode) and alpha (additive
-        mode) are interpretable regardless of the raw feature scale.
-
-        Args:
-            source: Source point cloud.
-            target: Target point cloud.
-
-        Returns:
-            Tuple (feat_src_z, feat_tgt_z), each of shape (N, D) and (M, D) respectively.
-        """
-        feat_src = self.feature_extractor.get_features(source)   # (N, D)
-        feat_tgt = self.feature_extractor.get_features(target)   # (M, D)
-        feat_mean = feat_tgt.mean(axis=0)
-        feat_std  = feat_tgt.std(axis=0) + 1e-8
-        return (feat_src - feat_mean) / feat_std, (feat_tgt - feat_mean) / feat_std
-
     def match(self, source: PointCloud, target: PointCloud) -> Matching:
         """Soft Gaussian correspondence from source to target.
 
@@ -158,22 +232,13 @@ class GaussianMatcher(Matcher):
         # --- Candidate selection ---
         feat_src_z = feat_tgt_z = None
         if self.feature_extractor is not None:
-            feat_src_z, feat_tgt_z = self._zscored_features(source, target)
+            feat_src_z, feat_tgt_z = _zscored_features(self.feature_extractor, source, target)
 
         n = len(source.points)
-        if feat_src_z is not None and self.feature_mode == 'append':
-            all_pts  = np.vstack([source.points, target.points])
-            pos_mean = all_pts.mean()
-            pos_std  = all_pts.std() + 1e-8
-            pos_src_z = (source.points - pos_mean) / pos_std  # (N, 3)
-            pos_tar_z = (target.points - pos_mean) / pos_std  # (M, 3)
-
-            joint_src = np.hstack([pos_src_z, self.beta * feat_src_z])  # (N, 3+D)
-            joint_tgt = np.hstack([pos_tar_z, self.beta * feat_tgt_z])  # (M, 3+D)
-            dists, nbr_idx = KDTree(joint_tgt).query(joint_src, k=k)    # joint dist
-            dists *= pos_std                                            # rescale to physical units
-            dists = dists.reshape(n, k)                                 # ensure (N, k)
-            nbr_idx = nbr_idx.reshape(n, k)
+        if feat_src_z is not None and feat_tgt_z is not None and self.feature_mode == 'append':
+            dists, nbr_idx = _joint_knn(
+                source.points, target.points, feat_src_z, feat_tgt_z, self.beta, k=k,
+            )
         else:
             dists, nbr_idx = KDTree(target.points).query(source.points, k=k)
             dists   = dists.reshape(n, k)                                    # ensure (N, k)
@@ -182,7 +247,7 @@ class GaussianMatcher(Matcher):
         # --- Log-weight computation ---
         log_w = -0.5 * (dists / self.sigma) ** 2                            # (N, k)
 
-        if feat_src_z is not None and self.feature_mode == 'additive' and self.alpha != 0.0:
+        if feat_src_z is not None and feat_tgt_z is not None and self.feature_mode == 'additive' and self.alpha != 0.0:
             norm = np.linalg.norm(feat_src_z, axis=1, keepdims=True) + 1e-8
             feat_src_unit = feat_src_z / norm                                # (N, D)
             norm = np.linalg.norm(feat_tgt_z, axis=1, keepdims=True) + 1e-8
