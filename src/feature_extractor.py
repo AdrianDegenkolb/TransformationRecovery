@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 import numpy as np
-import numpy.typing as npt
+from numpy.typing import NDArray
 from scipy.spatial import KDTree
 
 from point_cloud import PointCloud
@@ -18,7 +18,7 @@ class FeatureExtractor(ABC):
     """
 
     @abstractmethod
-    def get_features(self, p: PointCloud) -> npt.NDArray:
+    def get_features(self, p: PointCloud) -> NDArray[np.float64]:
         """Compute a feature vector for each point in the cloud.
 
         Args:
@@ -58,7 +58,7 @@ class GeometricFeatureExtractor(FeatureExtractor):
         """
         self.k = k
 
-    def get_features(self, p: PointCloud) -> npt.NDArray:
+    def get_features(self, p: PointCloud) -> NDArray[np.float64]:
         """Compute 9-dimensional geometric feature vectors for all points.
 
         Args:
@@ -136,7 +136,7 @@ class IdentityFeatureExtractor(FeatureExtractor):
         high memory usage and slow cosine similarity computation.
     """
 
-    def get_features(self, p: PointCloud) -> npt.NDArray:
+    def get_features(self, p: PointCloud) -> NDArray[np.float64]:
         """Return the N×N identity matrix as feature matrix.
 
         Args:

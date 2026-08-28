@@ -1,8 +1,9 @@
 import numpy as np
+from numpy.typing import NDArray
 
 
 class PointCloud:
-    def __init__(self, points: np.ndarray):
+    def __init__(self, points: NDArray[np.float64]):
         self.points = np.asarray(points, dtype=np.float64)
         if self.points.ndim != 2 or self.points.shape[1] != 3:
             raise ValueError(f"Expected (N, 3) array, got {self.points.shape}")

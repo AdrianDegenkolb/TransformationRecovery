@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
+from numpy.typing import NDArray
 from tabulate import tabulate
 
 from point_cloud import PointCloud
@@ -37,13 +38,13 @@ class SyntheticExperiment:
     T_gt: RigidTransformation
 
     def __repr__(self):
-        rows = [
-            ["Original Point Cloud", self.S],
-            ["Transformation 1", self.T1],
-            ["Transformation 2", self.T2],
-            ["Point Cloud 1", self.P],
-            ["Point Cloud 2", self.Q],
-            ["GT transformation", self.T_gt]
+        rows: list[tuple[str, object]] = [
+            ("Original Point Cloud", self.S),
+            ("Transformation 1", self.T1),
+            ("Transformation 2", self.T2),
+            ("Point Cloud 1", self.P),
+            ("Point Cloud 2", self.Q),
+            ("GT transformation", self.T_gt)
         ]
         return tabulate(rows, tablefmt="rounded_outline")
 
@@ -94,7 +95,7 @@ class SyntheticExperiment:
         return PointCloud(self.P.points[indices_for_P]), PointCloud(self.Q.points[indices_for_Q])
 
 
-def _make_cloud(n: int, style: CloudStyle) -> np.ndarray:
+def _make_cloud(n: int, style: CloudStyle) -> NDArray[np.float64]:
     """Dispatch to the appropriate cloud generator.
 
     Args:
@@ -113,7 +114,7 @@ def _make_cloud(n: int, style: CloudStyle) -> np.ndarray:
     raise ValueError(f"Unknown cloud style {style!r}. Choose from 'random', 'clustered', 'lattice'.")
 
 
-def _random_cloud(n: int) -> np.ndarray:
+def _random_cloud(n: int) -> NDArray[np.float64]:
     """Uniform random points in [-30, 30]^3.
 
     Args:
@@ -125,7 +126,7 @@ def _random_cloud(n: int) -> np.ndarray:
     return np.random.uniform(-30, 30, size=(n, 3))
 
 
-def _clustered_cloud(n: int, n_clusters: int = 8, cluster_std: float = 4.0) -> np.ndarray:
+def _clustered_cloud(n: int, n_clusters: int = 8, cluster_std: float = 4.0) -> NDArray[np.float64]:
     """Dense Gaussian clusters with centres spread across [-20, 20]^3.
 
     Points are distributed evenly across clusters.  Because cluster centers
@@ -152,7 +153,7 @@ def _lattice_cloud(
     n: int,
     spacing: tuple[float, float, float] = (2.0, 3.5, 6.0),
     jitter_std: float = 0.3,
-) -> np.ndarray:
+) -> NDArray[np.float64]:
     """3-D lattice with anisotropic spacing and slight per-node jitter.
 
     The different spacing per axis makes rotations distinguishable: an ICP
