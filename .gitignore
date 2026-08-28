@@ -1,1 +1,6 @@
 .idea
+__pycache__/
+.vscode/
+.claude/
+.idea/
+.pytest_cache/
