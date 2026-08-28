@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from typing import Callable
+from typing import Any, Callable, Literal, cast
 
 import numpy as np
 import optuna
 
-from feature_extractor import GeometricFeatureExtractor
-from icp import ICP, SigmaAnnealingCallback
-from matcher import NearestNeighborMatcher, GaussianMatcher
-from synthetic import SyntheticExperiment, CloudStyle
 from algebra_utils import rotation_angle
+from feature_extractor import FeatureExtractor, GeometricFeatureExtractor
+from icp import ICP, SigmaAnnealingCallback
+from matcher import GaussianMatcher, NearestNeighborMatcher
+from synthetic import CloudStyle, SyntheticExperiment
 
 
 def build_icp_factory(
@@ -49,8 +49,8 @@ def build_icp_factory(
         return lambda: ICP(matcher=NearestNeighborMatcher(), max_iter=max_iter, tol=tol)
 
     # Feature extractor defaults (used when feature_extractor == 'none')
-    feature_extractor = None
-    feature_mode = 'additive'
+    feature_extractor: FeatureExtractor | None = None
+    feature_mode: Literal['additive', 'append'] = 'additive'
     alpha = 1.0
     beta = 1.0
 
@@ -58,7 +58,7 @@ def build_icp_factory(
     if feature_extractor_name == "geometric":
         fe_k = trial.suggest_int("fe_k", low=2, high=50)
         feature_extractor = GeometricFeatureExtractor(fe_k)
-        feature_mode = trial.suggest_categorical("feature_mode", ["additive", "append"])
+        feature_mode = cast(Literal['additive', 'append'], trial.suggest_categorical("feature_mode", ["additive", "append"]))
         if feature_mode == "additive":
             alpha = trial.suggest_float("alpha", low=0.0, high=10.0)
         else:
@@ -84,7 +84,7 @@ def evaluate_icp(
     icp_factory: Callable[[], ICP],
     style: CloudStyle,
     n_seeds: int,
-    gen_kwargs: dict,
+    gen_kwargs: dict[str, Any],
 ) -> dict[str, float]:
     """Evaluate an ICP configuration over multiple random seeds.
 
@@ -101,7 +101,8 @@ def evaluate_icp(
             mean_t_err:   Mean translation error across seeds.
             reliability:  Fraction of seeds where rotation error < 5°.
     """
-    rot_errs, t_errs = [], []
+    rot_errs: list[float] = []
+    t_errs: list[float] = []
     for seed in range(n_seeds):
         exp = SyntheticExperiment.generate(**gen_kwargs, style=style, seed=seed)
         result = icp_factory().fit(exp.P, exp.Q)
@@ -120,7 +121,7 @@ def evaluate_icp(
 def make_objective(
     style: CloudStyle,
     n_seeds: int,
-    gen_kwargs: dict,
+    gen_kwargs: dict[str, Any],
     max_iter: int,
     tol: float,
 ) -> Callable[[optuna.Trial], tuple[float, float]]:
