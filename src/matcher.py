@@ -125,7 +125,7 @@ class NearestNeighborMatcher(Matcher):
             Matching that assigns a target_point to each source point with uniform weights.
         """
         if self.feature_extractor is not None:
-            feat_src_z, feat_tgt_z = zscored_features(self.feature_extractor, source, target)
+            feat_src_z, feat_tgt_z = zscored_features(self.feature_extractor, [source, target])
             _, nbr_idx = _joint_knn(
                 source.points, target.points, feat_src_z, feat_tgt_z, self.beta, k=1,
             )
