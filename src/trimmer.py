@@ -1,12 +1,14 @@
 """Point cloud trimming utilities for removing geometrically redundant points."""
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from typing import Protocol
 
 import numpy as np
 from numpy.typing import NDArray
 
-from feature_extractor import FeatureExtractor
+from feature_extractor import FeatureExtractor, zscored_features
 from point_cloud import PointCloud
 
 
@@ -23,7 +25,7 @@ class Clusterer(Protocol):
 
     labels_: NDArray[np.int64]
 
-    def fit(self, X: NDArray[np.float64]) -> "Clusterer":
+    def fit(self, X: NDArray[np.float64]) -> Clusterer:
         """Fit the clustering model to data.
 
         Args:
@@ -43,14 +45,15 @@ class Trimmer(ABC):
     """
 
     @abstractmethod
-    def trim(self, p: PointCloud) -> PointCloud:
-        """Remove geometrically redundant points from a point cloud.
+    def trim(self, p: PointCloud | list[PointCloud]) -> PointCloud | list[PointCloud]:
+        """Remove geometrically redundant points from one or more point clouds.
 
         Args:
-            p: Input point cloud with N points.
+            p: A single PointCloud or a list of PointClouds.
 
         Returns:
-            Trimmed PointCloud containing a subset of points from p.
+            A single trimmed PointCloud if a single cloud was passed,
+            or a list of trimmed PointClouds if a list was passed.
         """
         ...
 
@@ -104,20 +107,36 @@ class ClusteringTrimmer(Trimmer):
                 large.add(int(label))
         return large
 
-    def trim(self, p: PointCloud) -> PointCloud:
-        """Remove points belonging to large feature-space clusters.
+    def trim(self, p: PointCloud | list[PointCloud]) -> PointCloud | list[PointCloud]:
+        """Trim point cloud(s) by discarding large-cluster points and replacing each with its centroid.
+
+        Features are z-scored jointly across all input clouds before clustering,
+        so the scale is consistent whether one or multiple clouds are passed.
 
         Args:
-            p: Input point cloud with N points.
+            p: A single PointCloud or a list of PointClouds.
 
         Returns:
-            PointCloud containing only points not assigned to large clusters.
+            A single trimmed PointCloud if a single cloud was passed,
+            or a list of trimmed PointClouds if a list was passed.
         """
-        features = self.feature_extractor.get_features(p)
-        self.clusterer.fit(features)
-        labels = self.clusterer.labels_
+        single = isinstance(p, PointCloud)
+        if single:
+            p = [p]
 
-        large = self._large_cluster_labels(labels, len(p))
-        mask = ~np.isin(labels, list(large))
+        features_per_cloud = zscored_features(self.feature_extractor, p)
+        reduceds: list[PointCloud] = []
+        for features, cloud in zip(features_per_cloud, p):
+            self.clusterer.fit(features)
+            labels = self.clusterer.labels_
 
-        return PointCloud(p.points[mask])
+            large = self._large_cluster_labels(labels, len(cloud))
+            mask = ~np.isin(labels, list(large))
+            # If all points belong to large clusters, mask is all-False and this is empty.
+            reduced: list[NDArray[np.float64]] = [
+                cloud.points[mask],
+                *[cloud.points[labels == lbl].mean(axis=0, keepdims=True) for lbl in large],
+            ]
+            reduceds.append(PointCloud(np.concatenate(reduced, axis=0)))
+
+        return reduceds[0] if single else reduceds
