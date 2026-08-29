@@ -144,6 +144,76 @@ class PointCloudVisualizer:
         axes[-1].grid(False)
         axes[-1].set_title('Final (converged)')
 
+    @staticmethod
+    def plot_cluster_coloring(
+        ax: Axes,
+        cloud: PointCloud,
+        labels: NDArray[np.int64],
+    ) -> None:
+        """3D scatter of a point cloud colored by feature-space cluster label.
+
+        Noise points (label -1) are drawn in black. Each cluster gets a distinct
+        color cycling through the tab20 colormap.
+
+        Args:
+            ax:     3D Axes to draw on (must be created with projection='3d').
+            cloud:  Point cloud with N points.
+            labels: Per-point cluster label array of shape (N,).
+        """
+        import matplotlib.pyplot as plt
+        colors = _cluster_point_colors(labels, plt.cm.tab20)
+        ax.scatter(cloud.points[:, 0], cloud.points[:, 1], cloud.points[:, 2], c=colors, s=10)
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.set_zlabel('z')
+        ax.set_title('Feature-space clusters (black = noise)')
+
+    @staticmethod
+    def plot_trimmer_result(
+        ax: Axes,
+        cloud: PointCloud,
+        labels: NDArray[np.int64],
+        large_labels: set[int],
+    ) -> None:
+        """3D scatter showing trimmer outcome: discarded points in gray, kept points colored.
+
+        Points in large clusters are drawn in gray with low alpha. All other points
+        (small clusters and noise) retain their cluster color.
+
+        Args:
+            ax:           3D Axes to draw on (must be created with projection='3d').
+            cloud:        Point cloud with N points.
+            labels:       Per-point cluster label array of shape (N,).
+            large_labels: Set of cluster labels considered large (to be discarded).
+        """
+        import matplotlib.pyplot as plt
+        point_colors = _cluster_point_colors(labels, plt.cm.tab20)
+        is_large = np.isin(labels, list(large_labels))
+
+        if is_large.any():
+            ax.scatter(
+                cloud.points[is_large, 0],
+                cloud.points[is_large, 1],
+                cloud.points[is_large, 2],
+                c='gray', alpha=0.15, s=10,
+                label=f'discarded ({is_large.sum()})',
+            )
+
+        kept = ~is_large
+        ax.scatter(
+            cloud.points[kept, 0],
+            cloud.points[kept, 1],
+            cloud.points[kept, 2],
+            c=point_colors[kept],
+            s=10,
+            label=f'kept ({kept.sum()})',
+        )
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.set_zlabel('z')
+        ax.set_title(f'Trimmer: {kept.sum()} / {len(cloud)} kept')
+        ax.legend(fontsize=7)
+
 
 class ErrorMetricsVisualizer:
     """Visualisation methods for ICP error metrics and performance distributions."""
@@ -668,3 +738,22 @@ def _plot_shaded_band(
     ax.set_xlabel(x_label)
     ax.set_ylabel(ylabel)
     ax.set_title(title)
+
+
+def _cluster_point_colors(
+    labels: NDArray[np.int64],
+    cmap,
+) -> NDArray[np.float64]:
+    """Map cluster labels to RGBA colors.
+
+    Args:
+        labels: Per-point cluster label array. Label -1 (noise) maps to black.
+        cmap:   Matplotlib colormap used for non-noise labels, cycled modulo 20.
+
+    Returns:
+        (N, 4) float64 array of RGBA colors.
+    """
+    return np.array([
+        (0.0, 0.0, 0.0, 1.0) if label == -1 else cmap((label % 20) / 20)
+        for label in labels
+    ])

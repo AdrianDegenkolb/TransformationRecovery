@@ -10,7 +10,7 @@ from tabulate import tabulate
 from point_cloud import PointCloud
 from transformation import RigidTransformation
 
-CloudStyle = Literal["random", "clustered", "lattice"]
+CloudStyle = Literal["random", "clustered", "lattice", "2d-lattice"]
 
 
 @dataclass
@@ -111,7 +111,9 @@ def _make_cloud(n: int, style: CloudStyle) -> NDArray[np.float64]:
         return _clustered_cloud(n)
     if style == "lattice":
         return _lattice_cloud(n)
-    raise ValueError(f"Unknown cloud style {style!r}. Choose from 'random', 'clustered', 'lattice'.")
+    if style == "2d-lattice":
+        return _2d_lattice_cloud(n, jitter_std=0)
+    raise ValueError(f"Unknown cloud style {style!r}. Choose from 'random', 'clustered', 'lattice', '2d-lattice'.")
 
 
 def _random_cloud(n: int) -> NDArray[np.float64]:
@@ -181,6 +183,42 @@ def _lattice_cloud(
     zs = np.arange(nz) * spacing[2]
 
     grid = np.stack(np.meshgrid(xs, ys, zs, indexing="ij"), axis=-1).reshape(-1, 3)
+    grid -= grid.mean(axis=0)
+    grid += np.random.normal(0, jitter_std, size=grid.shape)
+    return grid
+
+
+def _2d_lattice_cloud(
+    n: int,
+    spacing: tuple[float, float] = (2.0, 3.5),
+    jitter_std: float = 0.3,
+) -> NDArray[np.float64]:
+    """2-D lattice in the XY plane with anisotropic spacing and per-node jitter.
+
+    All points lie approximately in z=0, giving every point a high-planarity
+    geometric neighbourhood. This makes the 2D lattice a good test case for the
+    trimmer: the whole cloud is one large geometrically common region.
+
+    The actual count (nx * ny) may differ slightly from n because grid dimensions
+    are rounded to integers.
+
+    Args:
+        n:          Target number of points.
+        spacing:    Grid spacing along (x, y). Distinct values break x/y symmetry.
+        jitter_std: Std of per-node Gaussian jitter in all 3 axes.
+
+    Returns:
+        (nx*ny, 3) array centred at the origin.
+    """
+    ny = max(1, round(n ** 0.5))
+    nx = max(1, round(n / ny))
+
+    xs = np.arange(nx) * spacing[0]
+    ys = np.arange(ny) * spacing[1]
+
+    grid_xy = np.stack(np.meshgrid(xs, ys, indexing="ij"), axis=-1).reshape(-1, 2)
+    z = np.zeros((len(grid_xy), 1))
+    grid = np.hstack([grid_xy, z])
     grid -= grid.mean(axis=0)
     grid += np.random.normal(0, jitter_std, size=grid.shape)
     return grid

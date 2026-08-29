@@ -8,6 +8,30 @@ from scipy.spatial import KDTree
 
 from point_cloud import PointCloud
 
+def zscored_features(
+    feature_extractor: FeatureExtractor,
+    source: PointCloud,
+    target: PointCloud,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Compute z-scored feature matrices for source and target using target statistics.
+
+    Z-scoring uses target mean and std so that beta (append mode) and alpha (additive
+    mode) are interpretable regardless of the raw feature scale.
+
+    Args:
+        feature_extractor: Extractor producing a (N, D) feature matrix per cloud.
+        source: Source point cloud.
+        target: Target point cloud.
+
+    Returns:
+        Tuple (feat_src_z, feat_tgt_z), each of shape (N, D) and (M, D) respectively.
+    """
+    feat_src = feature_extractor.get_features(source)   # (N, D)
+    feat_tgt = feature_extractor.get_features(target)   # (M, D)
+    feat_mean = feat_tgt.mean(axis=0)
+    feat_std  = feat_tgt.std(axis=0) + 1e-8
+    return (feat_src - feat_mean) / feat_std, (feat_tgt - feat_mean) / feat_std
+
 
 class FeatureExtractor(ABC):
     """Base class for per-point geometric feature extractors.
