@@ -132,8 +132,12 @@ class GeometricFeatureExtractor(FeatureExtractor):
         ti, tj = np.triu_indices(k, k=1)
         angles = np.arccos(cos_mat[:, ti, tj])                              # (N, n_pairs)
 
-        ang_mean = angles.mean(axis=1, keepdims=True)                       # (N, 1)
-        ang_std  = angles.std(axis=1, keepdims=True)                        # (N, 1)
+        if angles.shape[1] == 0:
+            ang_mean = np.zeros((n, 1))
+            ang_std  = np.zeros((n, 1))
+        else:
+            ang_mean = angles.mean(axis=1, keepdims=True)                   # (N, 1)
+            ang_std  = angles.std(axis=1, keepdims=True)                    # (N, 1)
 
         return np.hstack([
             feat_d_min, feat_cv, centroid_offset,
@@ -249,7 +253,10 @@ class RobustGeometricFeatureExtractor(FeatureExtractor):
         ti, tj = np.triu_indices(k, k=1)
         angles = np.arccos(cos_mat[:, ti, tj])                              # (N, n_pairs)
 
-        angle_q = np.quantile(angles, self.quantiles, axis=1).T             # (N, Q)
+        if angles.shape[1] == 0:
+            angle_q = np.zeros((n, len(self.quantiles)))
+        else:
+            angle_q = np.quantile(angles, self.quantiles, axis=1).T  # (N, Q)
 
         return np.hstack([
             dist_q, centroid_offset,
