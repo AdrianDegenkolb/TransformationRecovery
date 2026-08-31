@@ -244,7 +244,7 @@ class ErrorMetricsVisualizer:
     @staticmethod
     def plot_rot_error_per_iterations(
         axis: Axes,
-        results_per_method: list[list[ICPResult]],
+        results_per_method: list[list[ICPResult | MultiStartICPResult]],
         ground_truths_per_method: list[list[RigidTransformation]],
         method_labels: list[str],
         colors: list[str] | None = None,
@@ -282,7 +282,7 @@ class ErrorMetricsVisualizer:
     @staticmethod
     def plot_translation_error_per_iterations(
         axis: Axes,
-        results_per_method: list[list[ICPResult]],
+        results_per_method: list[list[ICPResult | MultiStartICPResult]],
         ground_truths_per_method: list[list[RigidTransformation]],
         method_labels: list[str],
         colors: list[str] | None = None,
@@ -320,7 +320,7 @@ class ErrorMetricsVisualizer:
     @staticmethod
     def plot_residual_errors_per_iteration(
         axis: Axes,
-        results_per_method: list[list[ICPResult]],
+        results_per_method: list[list[ICPResult | MultiStartICPResult]],
         method_labels: list[str],
         colors: list[str] | None = None,
         x_label: str = 'Iteration',
@@ -350,7 +350,7 @@ class ErrorMetricsVisualizer:
     @staticmethod
     def plot_delta_per_iterations(
         axis: Axes,
-        results_per_method: list[list[ICPResult]],
+        results_per_method: list[list[ICPResult | MultiStartICPResult]],
         method_labels: list[str],
         colors: list[str] | None = None,
         x_label: str = 'Iteration',
