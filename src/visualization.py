@@ -628,14 +628,18 @@ class OptimizationVisualizer:
         y_values: NDArray[np.float64],
         group_ids: list[str],
         pareto_mask: NDArray[np.bool_],
+        size_values: NDArray[np.float64] | None = None,
         colors: dict[str, str] | None = None,
         x_label: str = 'Objective 1',
         y_label: str = 'Objective 2',
+        size_label: str = '',
     ) -> None:
         """Scatter plot of optimization trials with Pareto-optimal points highlighted.
 
         Points are colored by group (e.g. matching strategy). Pareto-optimal
-        points within each group receive a red edge.
+        points within each group receive a red edge. A third objective (e.g.
+        runtime) can be layered on via marker size rather than a 3rd plot axis,
+        keeping the two "quality" objectives readable on a standard 2D scatter.
 
         Args:
             ax:          Axes to draw on.
@@ -643,28 +647,47 @@ class OptimizationVisualizer:
             y_values:    Second objective value per trial, shape ``(N,)``.
             group_ids:   Group identifier per trial (e.g. ``'hard'`` / ``'soft'``).
             pareto_mask: Boolean mask marking Pareto-optimal trials, shape ``(N,)``.
+            size_values: Optional third metric per trial, shape ``(N,)``, encoded
+                         as marker size (larger marker = larger value). Useful for
+                         a metric that wasn't optimized for directly, or to see a
+                         3-objective front's third axis on a 2D plot.
             colors:      Mapping from group identifier to colour. Defaults to tab palette.
             x_label:     X-axis label.
             y_label:     Y-axis label.
+            size_label:  Name of the metric encoded by ``size_values``, shown in
+                         a small in-axes annotation. Ignored if ``size_values`` is None.
         """
         unique_groups = sorted(set(group_ids))
         if colors is None:
             colors = {g: _DEFAULT_COLORS[i] for i, g in enumerate(unique_groups)}
 
+        sizes = None
+        if size_values is not None:
+            span = np.ptp(size_values) + 1e-9
+            normalized = (size_values - size_values.min()) / span
+            sizes = 20 + normalized * 180  # marker area in points^2
+
         group_array = np.array(group_ids)
         for group in unique_groups:
             mask = group_array == group
-            ax.scatter(x_values[mask], y_values[mask], color=colors[group], alpha=0.4, s=25, label=group)
+            base_sizes = sizes[mask] if sizes is not None else 25
+            ax.scatter(x_values[mask], y_values[mask], color=colors[group], alpha=0.4, s=base_sizes, label=group)
             pareto_group = mask & pareto_mask
             if pareto_group.any():
+                pareto_sizes = sizes[pareto_group] if sizes is not None else 60
                 ax.scatter(
                     x_values[pareto_group], y_values[pareto_group],
-                    color=colors[group], edgecolors='red', linewidths=1.5, s=60, zorder=5,
+                    color=colors[group], edgecolors='red', linewidths=1.5, s=pareto_sizes, zorder=5,
                 )
 
         ax.set_xlabel(x_label)
         ax.set_ylabel(y_label)
         ax.legend(title='Group')
+        if size_values is not None and size_label:
+            ax.text(
+                0.02, 0.02, f'marker size ~ {size_label}',
+                transform=ax.transAxes, fontsize=8, alpha=0.7,
+            )
 
     @staticmethod
     def plot_feature_importance(
