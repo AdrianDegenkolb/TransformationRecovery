@@ -207,7 +207,7 @@ class GaussianMatcher(Matcher):
         # --- Candidate selection ---
         feat_src_z = feat_tgt_z = None
         if self.feature_extractor is not None:
-            feat_src_z, feat_tgt_z = zscored_features(self.feature_extractor, source, target)
+            feat_src_z, feat_tgt_z = zscored_features(self.feature_extractor, [source, target])
 
         n = len(source.points)
         if feat_src_z is not None and feat_tgt_z is not None and self.feature_mode == 'append':
