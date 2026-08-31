@@ -74,7 +74,7 @@ def build_icp_factory(
     def factory() -> ICP:
         matcher = GaussianMatcher(sigma=sigma_init, k=k, feature_extractor=feature_extractor,
                                   feature_mode=feature_mode, alpha=alpha, beta=beta)
-        annealer = SigmaAnnealingCallback(matcher, sigma_init, sigma_final, anneal_steps)
+        annealer = SigmaAnnealingCallback(sigma_init, sigma_final, anneal_steps)
         return ICP(matcher=matcher, max_iter=max_iter, tol=tol, callbacks=[annealer])
 
     return factory

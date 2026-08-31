@@ -5,16 +5,14 @@ from numpy.typing import NDArray
 from abc import ABC, abstractmethod
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any, Optional
 
 import numpy as np
 from tabulate import tabulate
 from tqdm import tqdm
 
-from algebra_utils import rotation_angle, sample_uniform_rotations
-from matcher import Matcher, Matching, NearestNeighborMatcher, GaussianMatcher
+from algebra_utils import sample_uniform_rotations
+from matcher import Matcher, Matching, NearestNeighborMatcher
 from point_cloud import PointCloud
-from synthetic import SyntheticExperiment
 from transformation import RigidTransformation
 
 
@@ -44,28 +42,30 @@ class SigmaAnnealingCallback(ICPCallback):
 
     def __init__(
         self,
-        matcher: GaussianMatcher,
         sigma_init: float,
         sigma_final: float,
         anneal_steps: int,
     ):
         """
         Args:
-            matcher:      GaussianMatcher whose sigma will be updated.
             sigma_init:   Starting bandwidth (large → soft/global).
             sigma_final:  Ending bandwidth (small → near-hard).
             anneal_steps: Number of iterations over which to anneal.
                           Typically, this is set equal to ICP max_iter.
         """
-        self.matcher = matcher
         self.sigma_init = sigma_init
         self.sigma_final = sigma_final
         self.anneal_steps = anneal_steps
 
     def on_iteration_start(self, iteration: int, icp: ICP) -> None:
-        """Update matcher.sigma for the current iteration."""
+        """Update icp.matcher.sigma for the current iteration.
+
+        Args:
+            iteration: Zero-based iteration index.
+            icp:       The running ICP instance; its matcher must be a GaussianMatcher.
+        """
         t = min(iteration, self.anneal_steps - 1) / max(self.anneal_steps - 1, 1)
-        self.matcher.sigma = float(
+        icp.matcher.sigma = float(
             self.sigma_init * (self.sigma_final / self.sigma_init) ** t
         )
 
@@ -132,7 +132,7 @@ class MultiStartICPResult:
         return tabulate(rows, tablefmt="rounded_outline")
 
     @property
-    def individual_durations_summed(self):
+    def individual_durations_summed(self) -> float:
         return sum([result.duration_s for result in self.all_results])
 
     @property
@@ -149,78 +149,31 @@ class MultiStartICPResult:
             return getattr(self.best, name)
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
+def _windowed_delta(
+    transform_history: list[RigidTransformation],
+    accumulated: RigidTransformation,
+    window: int = 10,
+) -> float:
+    """Convergence delta: how far the last `window` steps' composition is from identity.
 
-@dataclass
-class MultiSeedSyntheticICPResult:
+    Args:
+        transform_history: Accumulated transformation after each prior M-step.
+        accumulated:        Current accumulated transformation.
+        window:              Number of trailing steps to compose over. If fewer
+                             than `window` steps have elapsed, uses `accumulated`
+                             directly (i.e. compares against the identity from
+                             the very start of the run).
+
+    Returns:
+        ||R - I||_F + ||t||_2, where R, t come from composing `accumulated`
+        with the inverse of the transformation from `window` steps ago.
     """
-    Holds reference to a synthetic experiment and (MultiStart)ICPResult object each for a set of seeds.
-    """
-    r: dict[int, tuple[SyntheticExperiment, ICPResult | MultiStartICPResult]] = field(default_factory=dict)
-
-    def __getitem__(self, seed: int) -> Optional[tuple[SyntheticExperiment, ICPResult | MultiStartICPResult]]:
-        return self.r[seed] if seed in self.r else None
-
-    @property
-    def results(self) -> list[ICPResult | MultiStartICPResult]:
-        """
-        A list of (MultiStart)ICPResults, one per seed
-        """
-        return [t[1] for t in self.r.values()]
-
-    @property
-    def experiments(self) -> list[SyntheticExperiment]:
-        """
-        A list of SyntheticExperiments, one per seed
-        """
-        return [t[0] for t in self.r.values()]
-
-    @property
-    def ground_truths(self) -> list[RigidTransformation]:
-        """
-        A list of ground truth transformations, one per seed
-        """
-        return [t[0].T_gt for t in self.r.values()]
-
-    @property
-    def rotation_errors(self) -> list[float]:
-        """
-        A list of rotation errors, one per seed
-        """
-        return [rotation_angle(res.transformation.R, gt.R) for res, gt in zip(self.results, self.ground_truths)]
-
-    @property
-    def translation_errors(self) -> list[float]:
-        """
-        A list of translation errors, one per seed
-        """
-        return [float(np.linalg.norm(res.transformation.t - gt.t)) for res, gt in zip(self.results, self.ground_truths)]
-
-    @property
-    def residuals(self) -> list[NDArray[np.float64]]:
-        """
-        A list of residuals, one array per seed
-        """
-        acc: list[NDArray[np.float64]] = []
-        for exp, result in self.r.values():
-            q_pred = result.transformation.apply(exp.P)
-            nearest_matching = NearestNeighborMatcher().match(q_pred, exp.Q)
-            residual = np.linalg.norm(nearest_matching.source_points - nearest_matching.target_positions, axis=1)
-            acc.append(residual)
-        return acc
-
-    @property
-    def mean_residuals(self) -> list[float]:
-        """
-        A list of mean residual errors, one per seed
-        """
-        return [res.mean() for res in self.residuals]
-
-    @property
-    def durations_s(self) -> list[float]:
-        """
-        A list of durations, one per seed
-        """
-        return [res.duration_s for res in self.results]
+    if len(transform_history) >= window:
+        ref = transform_history[-window]
+        recent = accumulated.compose(ref.inverse())
+    else:
+        recent = accumulated
+    return float(np.linalg.norm(recent.R - np.eye(3), ord="fro") + np.linalg.norm(recent.t))
 
 
 class ICP:
@@ -290,16 +243,7 @@ class ICP:
             transformation = RigidTransformation.fit(src_pc, tgt_pc, weights=matching.weights)
             accumulated = transformation.compose(accumulated)
             residual = float(transformation.residuals(src_pc, tgt_pc).mean())
-
-            # as an early stopping criteria consider the composition of the latest 10 transformation
-            # if this composition is close to the identity transformation we stop early
-            if len(transform_history) >= 10:
-                ref = transform_history[-10]
-                last_10_transformation = accumulated.compose(ref.inverse())
-            else:
-                last_10_transformation = accumulated
-
-            delta = float(np.linalg.norm(last_10_transformation.R - np.eye(3), ord="fro") + np.linalg.norm(last_10_transformation.t))
+            delta = _windowed_delta(transform_history, accumulated)
 
             pbar.set_postfix(residual=f"{residual:.4f}")
             cloud_history.append(current)
@@ -388,6 +332,7 @@ class MultiStartICP:
                 all_rotations.append(R_init)
                 if result.converged and result.mean_residuals[-1] < 1e-3:
                     pool.shutdown(cancel_futures=True)
+                    break
 
         pbar.close()
         best_idx = int(np.argmin([r.mean_residuals[-1] for r in all_results]))
@@ -423,36 +368,3 @@ class MultiStartICP:
         result.transformation = result.transformation.compose(init_tf)
         result.transform_history = [T.compose(init_tf) for T in result.transform_history]
         return result, R_init
-
-
-
-
-def fit_multi_seed(
-        icp: ICP | MultiStartICP, 
-        seeds: list[int],
-        dropout_prob: float = 0.0,
-        verbose: bool = True, 
-        experiment_kwargs: dict[str, Any] | None = None) -> MultiSeedSyntheticICPResult:
-        """
-        Given a list of seeds and optional experiment kwargs generate an experiment per seed solve it and report the results
-        Args:
-            icp: ICP or MultiStartICP instance to use for fitting
-            seeds: a list of seeds
-            dropout_prob: the probability to miss individual points in the observation
-            verbose: prints seed progress if true
-            experiment_kwargs: a dictionary of arguments for the SyntheticExperiment.generate method
-        Return:
-            Result and Experiment per seed
-        """
-        results: dict[int, tuple[SyntheticExperiment, ICPResult | MultiStartICPResult]] = {}
-        experiment_kwargs = experiment_kwargs or {}
-        cache_verbose = icp.verbose
-        icp.verbose = False
-        for seed in tqdm(seeds, desc=f"Solving {len(seeds)} seeds", disable=not verbose):
-            exp = SyntheticExperiment.generate(**experiment_kwargs, seed=seed)
-            p, q = exp.observe_point_clouds(dropout_prob)
-            result = icp.fit(p, q)
-            results[seed] = (exp, result)
-
-        icp.verbose = cache_verbose
-        return MultiSeedSyntheticICPResult(results)
