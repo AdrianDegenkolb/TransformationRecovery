@@ -142,6 +142,122 @@ class GeometricFeatureExtractor(FeatureExtractor):
         ]).astype(np.float64)                                               # (N, 9)
 
 
+class RobustGeometricFeatureExtractor(FeatureExtractor):
+    """Similarity-invariant geometric feature extractor robust to point dropout (11-dimensional).
+
+    Refines GeometricFeatureExtractor in three ways, all aimed at keeping feature
+    vectors similar for points in similar geometric context while being resilient
+    to dropout (random loss of individual neighbor points, e.g. sensor misses):
+
+    - Neighbor distances and pairwise angles are summarized by quantiles instead
+      of single order statistics (nearest-neighbor distance) or raw moments
+      (mean/std). Quantiles are aggregate statistics over all k neighbors (or all
+      C(k, 2) pairs), so losing any one neighbor perturbs them only slightly, and
+      they capture distribution shape (e.g. a bimodal vs. a spread-out angle
+      distribution) that mean/std cannot.
+    - Distances are normalized by one scale computed over the whole cloud
+      (median of each point's local mean neighbor distance) instead of each
+      point's own local mean neighbor distance. This keeps the descriptor
+      invariant to the single global similarity transform being recovered,
+      while preserving relative density differences between distinct regions
+      of the same cloud as a discriminative signal.
+    - The PCA covariance used for linearity/planarity/sphericity/anisotropy is
+      computed about the neighbor centroid rather than about the query point,
+      so these features describe pure local shape instead of being mixed with
+      the point's offset within its own neighborhood (already captured
+      separately by centroid_offset).
+
+    For each point p with k nearest neighbors at distances d_1 ≤ ... ≤ d_k and
+    the C(k, 2) pairwise angles between neighbor direction vectors:
+
+    - dist quantiles (Q25, Q50, Q75 by default) — d_i / scale
+    - centroid_offset       — ||p - neighbor_centroid|| / scale
+    - linearity             — (λ1 - λ2) / λ1
+    - planarity             — (λ2 - λ3) / λ1
+    - sphericity            — λ3 / λ1
+    - anisotropy            — (λ1 - λ3) / λ1
+    - angle quantiles (Q25, Q50, Q75 by default) — pairwise neighbor-direction angles
+
+    where scale is the median, over all points in the cloud, of each point's
+    mean neighbor distance. All features are invariant under similarity
+    transformations (rotation, translation, uniform scale) applied to the
+    whole cloud. Features are computed once per cloud and can be cached
+    across ICP iterations.
+    """
+
+    def __init__(self, k: int = 20, quantiles: tuple[float, ...] = (0.25, 0.5, 0.75)) -> None:
+        """
+        Args:
+            k: Number of nearest neighbors used to compute local geometry.
+               Must be >= 2 for pairwise angles; clamped to N-1 if necessary.
+            quantiles: Quantile levels in [0, 1] used to summarize the neighbor
+                       distance and pairwise angle distributions.
+        """
+        self.k = k
+        self.quantiles = quantiles
+
+    def get_features(self, p: PointCloud) -> NDArray[np.float64]:
+        """Compute geometric feature vectors for all points.
+
+        Args:
+            p: Input point cloud with N points (N >= 2).
+
+        Returns:
+            Float64 array of shape (N, 5 + 2 * len(quantiles)).
+        """
+        points = p.points                                                   # (N, 3)
+        n = len(points)
+        k = min(self.k, n - 1)
+        eps = 1e-8
+
+        # k-NN excluding self (query k+1, drop index 0 which is the point itself)
+        _, idx = KDTree(points).query(points, k=k + 1)
+        idx = idx[:, 1:]                                                    # (N, k)
+        nbr_pts = points[idx]                                               # (N, k, 3)
+
+        # --- Point-relative geometry (distances, directions, centroid offset) ---
+        diff = nbr_pts - points[:, None, :]                                 # (N, k, 3)
+        dists = np.linalg.norm(diff, axis=2)                                # (N, k)
+        d_bar = dists.mean(axis=1)                                          # (N,)
+        scale = np.median(d_bar) + eps                                      # scalar, shared across the cloud
+
+        dist_q = np.quantile(dists, self.quantiles, axis=1).T / scale       # (N, Q)
+
+        nbr_centroid = nbr_pts.mean(axis=1)                                 # (N, 3)
+        centroid_offset = np.linalg.norm(
+            points - nbr_centroid, axis=1, keepdims=True
+        ) / scale                                                           # (N, 1)
+
+        # --- PCA eigenvalue ratios (covariance about the neighbor centroid) ---
+        diff_c = nbr_pts - nbr_centroid[:, None, :]                         # (N, k, 3)
+        cov = np.einsum('nki,nkj->nij', diff_c, diff_c) / k                 # (N, 3, 3)
+        eigvals = np.linalg.eigvalsh(cov)                                   # (N, 3) ascending
+        lam1 = eigvals[:, 2:3]                                              # (N, 1) largest
+        lam2 = eigvals[:, 1:2]
+        lam3 = eigvals[:, 0:1]                                              # (N, 1) smallest
+        l1 = np.maximum(lam1, eps)
+
+        linearity  = (lam1 - lam2) / l1                                     # (N, 1)
+        planarity  = (lam2 - lam3) / l1                                     # (N, 1)
+        sphericity = lam3 / l1                                              # (N, 1)
+        anisotropy = (lam1 - lam3) / l1                                     # (N, 1)
+
+        # --- Pairwise angles between (point-relative) neighbor direction vectors ---
+        dirs = diff / (np.linalg.norm(diff, axis=2, keepdims=True) + eps)   # (N, k, 3)
+        cos_mat = np.einsum('nid,njd->nij', dirs, dirs)   # (N, k, k)
+        cos_mat = np.clip(cos_mat, -1.0, 1.0)
+        ti, tj = np.triu_indices(k, k=1)
+        angles = np.arccos(cos_mat[:, ti, tj])                              # (N, n_pairs)
+
+        angle_q = np.quantile(angles, self.quantiles, axis=1).T             # (N, Q)
+
+        return np.hstack([
+            dist_q, centroid_offset,
+            linearity, planarity, sphericity, anisotropy,
+            angle_q,
+        ]).astype(np.float64)                                               # (N, 5 + 2*len(quantiles))
+
+
 class IdentityFeatureExtractor(FeatureExtractor):
     """Oracle feature extractor that returns the N×N identity matrix.
 
