@@ -67,6 +67,13 @@ class ClusteringTrimmer(Trimmer):
     Points in small clusters and noise points (label -1) are retained, as these
     correspond to geometrically distinctive regions most useful for matching.
 
+    When trimming multiple clouds (e.g. an ICP source/target pair), clustering is
+    performed once on their concatenated feature matrix rather than separately per
+    cloud. This guarantees every cloud agrees on which region of feature space is
+    "large" vs. "distinctive" — with independent per-cloud fits, two differently
+    noised observations of the same underlying structure could easily disagree,
+    trimming corresponding regions asymmetrically and undermining correspondence.
+
     Args:
         feature_extractor: Extracts per-point feature vectors of shape (N, D).
         clusterer: Clustering algorithm implementing the Clusterer protocol.
@@ -110,8 +117,11 @@ class ClusteringTrimmer(Trimmer):
     def trim(self, p: PointCloud | list[PointCloud]) -> PointCloud | list[PointCloud]:
         """Trim point cloud(s) by discarding large-cluster points and replacing each with its centroid.
 
-        Features are z-scored jointly across all input clouds before clustering,
-        so the scale is consistent whether one or multiple clouds are passed.
+        Features are z-scored jointly across all input clouds, then clustered
+        jointly (a single fit on the concatenated feature matrix) before splitting
+        labels back out per cloud. "Large" is likewise determined from the pooled
+        cluster sizes, so every cloud discards/keeps the same regions of feature
+        space, even if their point counts within a given cluster differ.
 
         Args:
             p: A single PointCloud or a list of PointClouds.
@@ -125,17 +135,26 @@ class ClusteringTrimmer(Trimmer):
             p = [p]
 
         features_per_cloud = zscored_features(self.feature_extractor, p)
-        reduceds: list[PointCloud] = []
-        for features, cloud in zip(features_per_cloud, p):
-            self.clusterer.fit(features)
-            labels = self.clusterer.labels_
+        joint_features = np.concatenate(features_per_cloud, axis=0)
+        self.clusterer.fit(joint_features)
+        joint_labels = self.clusterer.labels_
+        large = self._large_cluster_labels(joint_labels, len(joint_features))
 
-            large = self._large_cluster_labels(labels, len(cloud))
+        reduceds: list[PointCloud] = []
+        offset = 0
+        for cloud in p:
+            labels = joint_labels[offset:offset + len(cloud)]
+            offset += len(cloud)
+
             mask = ~np.isin(labels, list(large))
             # If all points belong to large clusters, mask is all-False and this is empty.
+            # A large cluster may have no points in this particular cloud; skip those.
             reduced: list[NDArray[np.float64]] = [
                 cloud.points[mask],
-                *[cloud.points[labels == lbl].mean(axis=0, keepdims=True) for lbl in large],
+                *[
+                    cloud.points[labels == lbl].mean(axis=0, keepdims=True)
+                    for lbl in large if (labels == lbl).any()
+                ],
             ]
             reduceds.append(PointCloud(np.concatenate(reduced, axis=0)))
 
