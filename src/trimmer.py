@@ -81,6 +81,13 @@ class ClusteringTrimmer(Trimmer):
             points are considered large and discarded. Default 0.05 (5%).
         min_cluster_size: Absolute minimum number of points for a cluster to be
             considered large. Both thresholds must be exceeded. Default 1.
+        min_points: Floor on the number of points a trimmed cloud may retain.
+            Aggressive settings (e.g. a large min_cluster_fraction) can otherwise
+            collapse a cloud to a handful of points or none at all, which is too
+            few for downstream feature extraction / matching to work with. Large
+            clusters are discarded largest-first, stopping before the next one
+            would drop the cloud below this floor, so as much redundancy as
+            possible is still trimmed. Default 4.
     """
 
     def __init__(
@@ -89,11 +96,13 @@ class ClusteringTrimmer(Trimmer):
         clusterer: Clusterer,
         min_cluster_fraction: float = 0.05,
         min_cluster_size: int = 1,
+        min_points: int = 4,
     ) -> None:
         self.feature_extractor = feature_extractor
         self.clusterer = clusterer
         self.min_cluster_fraction = min_cluster_fraction
         self.min_cluster_size = min_cluster_size
+        self.min_points = min_points
 
     def _large_cluster_labels(self, labels: NDArray[np.int64], n_points: int) -> set[int]:
         """Return cluster labels that exceed both size thresholds.
@@ -123,6 +132,12 @@ class ClusteringTrimmer(Trimmer):
         cluster sizes, so every cloud discards/keeps the same regions of feature
         space, even if their point counts within a given cluster differ.
 
+        Within each cloud, large clusters are discarded largest-first (each
+        replaced by its centroid), stopping before the next discard would drop
+        the cloud below `min_points` — too few points are useless (or worse,
+        crash-inducing) for downstream feature extraction / matching, regardless
+        of how redundant they were.
+
         Args:
             p: A single PointCloud or a list of PointClouds.
 
@@ -146,14 +161,29 @@ class ClusteringTrimmer(Trimmer):
             labels = joint_labels[offset:offset + len(cloud)]
             offset += len(cloud)
 
-            mask = ~np.isin(labels, list(large))
-            # If all points belong to large clusters, mask is all-False and this is empty.
-            # A large cluster may have no points in this particular cloud; skip those.
+            # Discard large clusters largest-first (each replaced by one centroid
+            # point, a net reduction of count - 1), stopping before the next
+            # discard would drop the cloud below min_points. A large cluster may
+            # have no points in this particular cloud; those are skipped as a
+            # no-op rather than counted against the floor.
+            sizes = {lbl: int((labels == lbl).sum()) for lbl in large}
+            to_discard: list[int] = []
+            remaining = len(cloud)
+            for lbl in sorted(large, key=lambda l: sizes[l], reverse=True):
+                count = sizes[lbl]
+                if count == 0:
+                    continue
+                if remaining - (count - 1) < self.min_points:
+                    break
+                remaining -= count - 1
+                to_discard.append(lbl)
+
+            mask = ~np.isin(labels, to_discard)
             reduced: list[NDArray[np.float64]] = [
                 cloud.points[mask],
                 *[
                     cloud.points[labels == lbl].mean(axis=0, keepdims=True)
-                    for lbl in large if (labels == lbl).any()
+                    for lbl in to_discard
                 ],
             ]
             reduceds.append(PointCloud(np.concatenate(reduced, axis=0)))
