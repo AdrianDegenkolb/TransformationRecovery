@@ -286,20 +286,25 @@ class MultiStartICP:
         n_starts: int = 20,
         n_jobs: int = -1,
         seed: int | None = None,
-        verbose: bool = True
+        verbose: bool = True,
+        residual_threshold: float = 1e-3,
     ):
         """
         Args:
-            icp:      Configured ICP instance reused across all trials.
-            n_starts: Number of random starting rotations to try.
-            n_jobs:   Worker processes. -1 uses os.cpu_count().
-            seed:     Optional random seed for reproducible rotation sampling.
+            icp:                 Configured ICP instance reused across all trials.
+            n_starts:            Number of random starting rotations to try.
+            n_jobs:              Worker processes. -1 uses os.cpu_count().
+            seed:                Optional random seed for reproducible rotation sampling.
+            verbose:             Show a progress bar if True.
+            residual_threshold:  Mean residual below which a converged trial
+                                 triggers early stopping of remaining trials.
         """
         self.icp = icp
         self.n_starts = n_starts
         self.n_jobs = n_jobs
         self.seed = seed
         self.verbose = verbose
+        self.residual_threshold = residual_threshold
 
     def fit(self, source: PointCloud, target: PointCloud) -> MultiStartICPResult:
         """Run ICP from n_starts random rotations and return the best result.
@@ -330,7 +335,7 @@ class MultiStartICP:
                 result, R_init = future.result()
                 all_results.append(result)
                 all_rotations.append(R_init)
-                if result.converged and result.mean_residuals[-1] < 1e-3:
+                if result.converged and result.mean_residuals[-1] < self.residual_threshold:
                     pool.shutdown(cancel_futures=True)
                     break
 
