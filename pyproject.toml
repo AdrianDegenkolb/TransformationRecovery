@@ -1,0 +1,21 @@
+[project]
+name = "transformation-recovery"
+version = "0.1.0"
+description = "Transformation recovery that maps one PointCloud close to another."
+requires-python = ">=3.13"
+dependencies = [
+    "matplotlib>=3.11.1",
+    "numpy>=2.5.2",
+    "optuna>=4.9.0",
+    "scikit-learn>=1.9.0",
+    "scipy>=1.18.1",
+    "tabulate>=0.10.0",
+    "torch>=2.13.0",
+    "tqdm>=4.70.0",
+]
+
+[dependency-groups]
+dev = [
+    "jupyter>=1.1.1",
+    "pytest>=9.1.1",
+]
