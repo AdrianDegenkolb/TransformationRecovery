@@ -10,7 +10,7 @@ from tabulate import tabulate
 from point_cloud import PointCloud
 from transformation import RigidTransformation
 
-CloudStyle = Literal["random", "clustered", "lattice", "2d-lattice"]
+CloudStyle = Literal["random", "clustered", "lattice", "2d-lattice", "muscle-fiber"]
 
 
 @dataclass
@@ -55,16 +55,20 @@ class SyntheticExperiment:
         t_scale: float = 8.0,
         seed: int | None = 42,
         style: CloudStyle = "random",
+        jitter_std: float = 0.0,
     ) -> SyntheticExperiment:
         """Generate a synthetic point cloud experiment with two rigid transformations.
 
         Args:
-            n:         Target number of points in the source cloud.
-                       For 'lattice' the actual count may differ slightly due to integer grid dims.
-            noise_std: Per-point Gaussian noise added when applying each transformation.
-            t_scale:   Scale of the random translation component.
-            seed:      Random seed for reproducibility. Pass None for a random run.
-            style:     Shape of the source cloud — 'random', 'clustered', or 'lattice'.
+            n:          Target number of points in the source cloud.
+                        For 'lattice' the actual count may differ slightly due to integer grid dims.
+            noise_std:  Per-point Gaussian noise added when applying each transformation.
+            t_scale:    Scale of the random translation component.
+            seed:       Random seed for reproducibility. Pass None for a random run.
+            style:      Shape of the source cloud — 'random', 'clustered', 'lattice', '2d-lattice',
+                        or 'muscle-fiber'.
+            jitter_std: Std of per-node Gaussian jitter for 'lattice'/'2d-lattice'/'muscle-fiber'
+                        styles. Ignored otherwise.
 
         Returns:
             SyntheticExperiment with S, T1, T2, P, Q, and T_gt = T2 ∘ T1⁻¹.
@@ -72,7 +76,7 @@ class SyntheticExperiment:
         if seed is not None:
             np.random.seed(seed)
 
-        S = PointCloud(_make_cloud(n, style))
+        S = PointCloud(_make_cloud(n, style, jitter_std))
         T1 = RigidTransformation.random(noise_std=noise_std, t_scale=t_scale)
         T2 = RigidTransformation.random(noise_std=noise_std, t_scale=t_scale)
         P = T1.apply(S)
@@ -95,12 +99,13 @@ class SyntheticExperiment:
         return PointCloud(self.P.points[indices_for_P]), PointCloud(self.Q.points[indices_for_Q])
 
 
-def _make_cloud(n: int, style: CloudStyle) -> NDArray[np.float64]:
+def _make_cloud(n: int, style: CloudStyle, jitter_std: float = 0.0) -> NDArray[np.float64]:
     """Dispatch to the appropriate cloud generator.
 
     Args:
-        n:     Target number of points.
-        style: One of 'random', 'clustered', 'lattice'.
+        n:          Target number of points.
+        style:      One of 'random', 'clustered', 'lattice', '2d-lattice', 'muscle-fiber'.
+        jitter_std: Std of per-node Gaussian jitter, used by 'lattice'/'2d-lattice'/'muscle-fiber' only.
 
     Returns:
         (N, 3) float64 array of point positions.
@@ -110,10 +115,15 @@ def _make_cloud(n: int, style: CloudStyle) -> NDArray[np.float64]:
     if style == "clustered":
         return _clustered_cloud(n)
     if style == "lattice":
-        return _lattice_cloud(n)
+        return _lattice_cloud(n, jitter_std=jitter_std)
     if style == "2d-lattice":
-        return _2d_lattice_cloud(n, jitter_std=0)
-    raise ValueError(f"Unknown cloud style {style!r}. Choose from 'random', 'clustered', 'lattice', '2d-lattice'.")
+        return _2d_lattice_cloud(n, jitter_std=jitter_std)
+    if style == "muscle-fiber":
+        return _muscle_fiber_cloud(n, jitter_std=jitter_std)
+    raise ValueError(
+        f"Unknown cloud style {style!r}. Choose from 'random', 'clustered', 'lattice', "
+        "'2d-lattice', 'muscle-fiber'."
+    )
 
 
 def _random_cloud(n: int) -> NDArray[np.float64]:
@@ -222,3 +232,71 @@ def _2d_lattice_cloud(
     grid -= grid.mean(axis=0)
     grid += np.random.normal(0, jitter_std, size=grid.shape)
     return grid
+
+
+def _muscle_fiber_cloud(
+    n: int,
+    fiber_radius: float = 3.0,
+    fiber_spacing: float = 8.0,
+    nucleus_spacing: float = 4.0,
+    nuclei_per_fiber: int = 20,
+    jitter_std: float = 0.3,
+) -> NDArray[np.float64]:
+    """Nuclei-like points on the periphery of parallel, hexagonally packed fibers.
+
+    Models skeletal muscle: fibers are parallel cylinders (long axis = z) packed
+    in a hexagonal cross-section lattice (xy), mirroring how fibers pack into a
+    fascicle. Nuclei sit on each fiber's surface at randomised angles around the
+    circumference and are spaced roughly evenly along its length — matching the
+    peripheral, sarcolemma-adjacent nuclear positioning seen in real muscle fibers.
+
+    The actual number of returned points (n_fibers * nuclei_per_fiber) may differ
+    slightly from n because the fiber count is rounded to an integer grid.
+
+    Args:
+        n:                Target number of points (nuclei).
+        fiber_radius:      Radius of each fiber; nuclei are placed at this distance
+                            from the fiber's central (z) axis.
+        fiber_spacing:     Centre-to-centre distance between neighbouring fibers.
+        nucleus_spacing:   Average distance between consecutive nuclei along a fiber.
+        nuclei_per_fiber:  Number of nuclei placed per fiber.
+        jitter_std:        Std of per-nucleus Gaussian jitter in all 3 axes.
+
+    Returns:
+        (n_fibers * nuclei_per_fiber, 3) array centred at the origin.
+    """
+    n_fibers = max(1, round(n / nuclei_per_fiber))
+    centers = _hexagonal_centers(n_fibers, fiber_spacing)
+
+    angles = np.random.uniform(0, 2 * np.pi, size=(len(centers), nuclei_per_fiber))
+    z = np.arange(nuclei_per_fiber) * nucleus_spacing + np.random.normal(
+        0, nucleus_spacing * 0.15, size=(len(centers), nuclei_per_fiber)
+    )
+    x = centers[:, 0:1] + fiber_radius * np.cos(angles)
+    y = centers[:, 1:2] + fiber_radius * np.sin(angles)
+
+    points = np.stack([x, y, z], axis=-1).reshape(-1, 3)
+    points += np.random.normal(0, jitter_std, size=points.shape)
+    points -= points.mean(axis=0)
+    return points
+
+
+def _hexagonal_centers(n: int, spacing: float) -> NDArray[np.float64]:
+    """Roughly square grid of 2-D centres arranged in hexagonal (honeycomb) packing.
+
+    Args:
+        n:       Target number of centres.
+        spacing: Centre-to-centre distance between neighbours.
+
+    Returns:
+        (N, 2) array of (x, y) centre positions; N may differ slightly from n
+        because the row/column counts are rounded to integers.
+    """
+    n_cols = max(1, round(n ** 0.5))
+    n_rows = max(1, round(n / n_cols))
+    row_height = spacing * (3 ** 0.5 / 2)
+
+    rows, cols = np.meshgrid(np.arange(n_rows), np.arange(n_cols), indexing="ij")
+    x = cols * spacing + (spacing / 2) * (rows % 2)
+    y = rows * row_height
+    return np.stack([x, y], axis=-1).reshape(-1, 2).astype(np.float64)

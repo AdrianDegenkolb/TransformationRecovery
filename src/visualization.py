@@ -93,6 +93,29 @@ class PointCloudVisualizer:
             ax.set_aspect('equal')
 
     @staticmethod
+    def plot_scatter_3d(
+        ax: Axes,
+        cloud: PointCloud,
+        color: str = 'tab:blue',
+        point_size: int = 3,
+        alpha: float = 0.4,
+    ) -> None:
+        """Plot a plain 3D scatter of a point cloud.
+
+        Args:
+            ax:         3D Axes to draw on (must be created with projection='3d').
+            cloud:      Point cloud to visualize.
+            color:      Scatter color.
+            point_size: Scatter point size.
+            alpha:      Scatter transparency.
+        """
+        pts = cloud.points
+        ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2], s=point_size, alpha=alpha, color=color)
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.set_zlabel('z')
+
+    @staticmethod
     def plot_alignment_snapshots(
         axes: Sequence[Axes],
         cloud_history: list[PointCloud],
