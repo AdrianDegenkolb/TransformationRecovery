@@ -1,7 +1,9 @@
 import numpy as np
 import pytest
 
-from icp import SigmaAnnealingCallback, _windowed_delta
+from algebra_utils import sample_dispersed_rotations, sample_uniform_rotations
+from icp import ICP, MultiStartICP, SigmaAnnealingCallback, _windowed_delta
+from point_cloud import PointCloud
 from transformation import RigidTransformation
 
 
@@ -93,3 +95,36 @@ def test_sigma_annealing_reads_icp_matcher_at_call_time():
 
     assert matcher_a.sigma == pytest.approx(2.0)
     assert matcher_b.sigma == pytest.approx(2.0)
+
+
+def test_multistart_icp_defaults_to_dispersed_rotation_sampler():
+    multi = MultiStartICP(icp=ICP())
+    assert multi.rotation_sampler is sample_dispersed_rotations
+
+
+def test_multistart_icp_accepts_custom_rotation_sampler():
+    multi = MultiStartICP(icp=ICP(), rotation_sampler=sample_uniform_rotations)
+    assert multi.rotation_sampler is sample_uniform_rotations
+
+
+def _small_clouds() -> tuple[PointCloud, PointCloud]:
+    source = PointCloud(np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]))
+    target = PointCloud(source.points + np.array([0.1, 0.0, 0.0]))
+    return source, target
+
+
+def test_icp_record_history_true_populates_cloud_and_matching_history():
+    source, target = _small_clouds()
+    result = ICP(max_iter=5, record_history=True).fit(source, target)
+    assert len(result.cloud_history) == result.n_iterations
+    assert len(result.matching_history) == result.n_iterations
+
+
+def test_icp_record_history_false_skips_cloud_and_matching_history():
+    source, target = _small_clouds()
+    result = ICP(max_iter=5, record_history=False).fit(source, target)
+    assert result.cloud_history == []
+    assert result.matching_history == []
+    # cheap per-iteration info is still recorded regardless
+    assert len(result.mean_residuals) == result.n_iterations
+    assert len(result.transform_history) == result.n_iterations

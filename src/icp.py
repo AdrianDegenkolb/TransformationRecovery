@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from numpy.typing import NDArray
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 
@@ -10,7 +11,7 @@ import numpy as np
 from tabulate import tabulate
 from tqdm import tqdm
 
-from algebra_utils import sample_uniform_rotations
+from algebra_utils import sample_dispersed_rotations
 from matcher import Matcher, Matching, NearestNeighborMatcher
 from point_cloud import PointCloud
 from transformation import RigidTransformation
@@ -81,7 +82,9 @@ class ICPResult:
         converged:           Whether the algorithm converged before max_iter.
         mean_residuals:      Mean point-to-point residual after each M-step.
         cloud_history:       Source cloud state at the start of each iteration.
+                             Empty if the ICP instance was created with record_history=False.
         matching_history:    Matching from the E-step of each iteration.
+                             Empty if the ICP instance was created with record_history=False.
         transform_history:   Accumulated transformation after each M-step.
         deltas:              Per step delta. ICP is considered converged if
                              delta = ||last_10_transformation.R - I||_F + ||last_10_transformation.t||_2 < tolerance
@@ -194,22 +197,31 @@ class ICP:
         tol: float = 1e-6,
         verbose: bool = False,
         callbacks: list[ICPCallback] | None = None,
+        record_history: bool = True,
     ):
         """
         Args:
-            matcher:   Correspondence algorithm for the E-step.
-                       Defaults to NearestNeighborMatcher.
-            max_iter:  Maximum number of EM iterations.
-            tol:       Convergence threshold on ||R_step - I||_F + ||t_step||.
-            verbose:   Show a progress bar if True.
-            callbacks: Optional list of ICPCallback instances called before
-                       each E-step (e.g. SigmaAnnealingCallback).
+            matcher:        Correspondence algorithm for the E-step.
+                            Defaults to NearestNeighborMatcher.
+            max_iter:       Maximum number of EM iterations.
+            tol:            Convergence threshold on ||R_step - I||_F + ||t_step||.
+            verbose:        Show a progress bar if True.
+            callbacks:      Optional list of ICPCallback instances called before
+                            each E-step (e.g. SigmaAnnealingCallback).
+            record_history: If False, skip recording cloud_history and
+                            matching_history (both O(n_points) per iteration).
+                            Set to False for large sweeps that only need the
+                            final transformation, to avoid retaining a full
+                            point cloud + correspondence set per iteration per
+                            trial. mean_residuals/transform_history/deltas are
+                            always recorded (cheap, and needed for convergence).
         """
         self.matcher = matcher or NearestNeighborMatcher()
         self.max_iter = max_iter
         self.tol = tol
         self.verbose = verbose
         self.callbacks = callbacks or []
+        self.record_history = record_history
 
     def fit(self, source: PointCloud, target: PointCloud) -> ICPResult:
         """Run ICP to find the rigid transformation mapping source onto target.
@@ -246,8 +258,9 @@ class ICP:
             delta = _windowed_delta(transform_history, accumulated)
 
             pbar.set_postfix(residual=f"{residual:.4f}")
-            cloud_history.append(current)
-            matching_history.append(matching)
+            if self.record_history:
+                cloud_history.append(current)
+                matching_history.append(matching)
             mean_residuals.append(residual)
             transform_history.append(accumulated)
             deltas.append(delta)
@@ -270,12 +283,15 @@ class ICP:
 
 
 class MultiStartICP:
-    """Runs ICP from multiple random starting rotations and returns the best result.
+    """Runs ICP from multiple dispersed starting rotations and returns the best result.
 
     Wraps an existing ICP instance. For each start, the source cloud is
-    pre-rotated by a uniformly sampled SO(3) rotation before running ICP.
-    The recovered transformations are composed with the initial rotation so
-    that all results refer to the original (un-rotated) source.
+    pre-rotated by one of a set of SO(3) rotations chosen via rotation_sampler
+    (greedy farthest-point selection by default, see sample_dispersed_rotations)
+    before running ICP, so the starts are spread across rotation space rather
+    than left to chance. The recovered transformations are composed with the
+    initial rotation so that all results refer to the original (un-rotated)
+    source.
 
     Trials are executed in parallel via ProcessPoolExecutor.
     """
@@ -288,16 +304,21 @@ class MultiStartICP:
         seed: int | None = None,
         verbose: bool = True,
         residual_threshold: float = 1e-3,
+        rotation_sampler: Callable[[int, np.random.Generator], list[NDArray[np.float64]]] = sample_dispersed_rotations,
     ):
         """
         Args:
             icp:                 Configured ICP instance reused across all trials.
-            n_starts:            Number of random starting rotations to try.
+            n_starts:            Number of starting rotations to try.
             n_jobs:              Worker processes. -1 uses os.cpu_count().
             seed:                Optional random seed for reproducible rotation sampling.
             verbose:             Show a progress bar if True.
             residual_threshold:  Mean residual below which a converged trial
                                  triggers early stopping of remaining trials.
+            rotation_sampler:    Callable(n, rng) -> list of n (3, 3) SO(3) rotations
+                                 used to seed the starts. Defaults to greedy
+                                 farthest-point sampling; pass e.g.
+                                 sample_uniform_rotations for plain i.i.d. sampling.
         """
         self.icp = icp
         self.n_starts = n_starts
@@ -305,9 +326,10 @@ class MultiStartICP:
         self.seed = seed
         self.verbose = verbose
         self.residual_threshold = residual_threshold
+        self.rotation_sampler = rotation_sampler
 
     def fit(self, source: PointCloud, target: PointCloud) -> MultiStartICPResult:
-        """Run ICP from n_starts random rotations and return the best result.
+        """Run ICP from n_starts rotations (via rotation_sampler) and return the best result.
 
         Args:
             source: Source PointCloud (N, 3).
@@ -317,7 +339,7 @@ class MultiStartICP:
             MultiICPResult containing the best ICPResult and all trial results.
         """
         rng = np.random.default_rng(self.seed)
-        rotations = sample_uniform_rotations(self.n_starts, rng=rng)
+        rotations = self.rotation_sampler(self.n_starts, rng)
 
         all_results: list[ICPResult] = []
         all_rotations: list[NDArray[np.float64]] = []

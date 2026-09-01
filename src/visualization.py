@@ -452,6 +452,7 @@ class ErrorMetricsVisualizer:
         y_labels: list[str],
         x_label: str = '',
         colors: list[str] | None = None,
+        label: str | None = None,
     ) -> None:
         """Plot mean ± 1 std shaded band for each metric over a parameter sweep.
 
@@ -464,6 +465,9 @@ class ErrorMetricsVisualizer:
             y_labels:        Y-axis label per metric (also used as subplot title).
             x_label:         Shared x-axis label.
             colors:          Line color per metric. Defaults to tab palette.
+            label:           Series label for the legend. If given, a legend is
+                             drawn on each axis — pass this when overlaying
+                             multiple calls (e.g. one per method) on the same axes.
         """
         if colors is None:
             colors = _DEFAULT_COLORS[:len(data_per_metric)]
@@ -471,12 +475,14 @@ class ErrorMetricsVisualizer:
         for ax, data, ylabel, color in zip(axes, data_per_metric, y_labels, colors):
             mean = data.mean(axis=1)
             std = data.std(axis=1)
-            ax.plot(x, mean, marker='o', ms=5, color=color, linewidth=2)
+            ax.plot(x, mean, marker='o', ms=5, color=color, linewidth=2, label=label)
             ax.fill_between(x, mean - std, mean + std, alpha=0.25, color=color)
             ax.set_xlabel(x_label)
             ax.set_ylabel(ylabel)
             ax.set_title(ylabel)
             ax.set_xticks(list(x))
+            if label is not None:
+                ax.legend()
 
 
 class ResidualVisualizer:

@@ -65,6 +65,45 @@ def sample_uniform_rotations(
     return [sample_uniform_rotation(rng) for _ in range(n)]
 
 
+def sample_dispersed_rotations(
+    n: int,
+    rng: np.random.Generator | None = None,
+    oversample_factor: int = 20,
+) -> list[NDArray[np.float64]]:
+    """
+    Sample n rotations from SO(3) that are spread apart via greedy farthest-point selection.
+
+    Draws a larger pool of uniform random rotations, then greedily selects
+    the n that maximize the minimum pairwise geodesic distance between
+    picks. This avoids the clustering and gaps that plain i.i.d. sampling
+    can produce for small n.
+
+    Args:
+        n:                 Number of rotations to select.
+        rng:               Optional numpy random generator for reproducibility.
+        oversample_factor: Candidate pool size relative to n (pool = n * oversample_factor).
+
+    Returns:
+        List of n rotation matrices, each of shape (3, 3), spread apart in SO(3).
+    """
+    rng = rng or np.random.default_rng()
+    if n <= 1:
+        return sample_uniform_rotations(n, rng=rng)
+
+    pool = sample_uniform_rotations(n * oversample_factor, rng=rng)
+
+    selected = [int(rng.integers(len(pool)))]
+    min_dist = np.array([rotation_angle(pool[selected[0]], R) for R in pool])
+
+    for _ in range(n - 1):
+        next_idx = int(np.argmax(min_dist))
+        selected.append(next_idx)
+        new_dist = np.array([rotation_angle(pool[next_idx], R) for R in pool])
+        min_dist = np.minimum(min_dist, new_dist)
+
+    return [pool[i] for i in selected]
+
+
 def six_d_to_rotation(six_d: torch.Tensor) -> torch.Tensor:
     """6D representation → SO(3) via Gram-Schmidt (Zhou et al., 2019).
 
