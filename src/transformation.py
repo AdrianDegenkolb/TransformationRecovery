@@ -20,13 +20,6 @@ class Transformation(ABC, metaclass=ABCMeta):
         """
         ...
 
-    def residuals(self, p1: PointCloud, q2: PointCloud) -> NDArray[np.float64]:
-        """
-        Given two point clouds of identical size n returns an array of size n that contains the distance between
-        f(p[i]) to q[i] in entry [i]
-        """
-        return np.linalg.norm(self.apply(p1).points - q2.points, axis=1)
-
 
 class RigidTransformation(Transformation):
     """f(p) = R @ p + t, optionally with additive Gaussian noise."""

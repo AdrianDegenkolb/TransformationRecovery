@@ -12,6 +12,7 @@ from tabulate import tabulate
 from tqdm import tqdm
 
 from algebra_utils import sample_dispersed_rotations
+from error_metrics import get_residuals
 from matcher import Matcher, Matching, NearestNeighborMatcher
 from point_cloud import PointCloud
 from transformation import RigidTransformation
@@ -254,7 +255,7 @@ class ICP:
             tgt_pc = PointCloud(matching.target_positions)
             transformation = RigidTransformation.fit(src_pc, tgt_pc, weights=matching.weights)
             accumulated = transformation.compose(accumulated)
-            residual = float(transformation.residuals(src_pc, tgt_pc).mean())
+            residual = float(get_residuals(matching, transformation.apply(src_pc)).mean())
             delta = _windowed_delta(transform_history, accumulated)
 
             pbar.set_postfix(residual=f"{residual:.4f}")
