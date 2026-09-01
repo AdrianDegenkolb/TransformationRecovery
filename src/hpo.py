@@ -135,7 +135,8 @@ def build_icp_factory(
     n_starts = trial.suggest_int("n_starts", 2, 20, log=True) if use_multistart else None
 
     def factory() -> ICP | MultiStartICP:
-        icp = ICP(matcher=matcher, max_iter=max_iter, tol=tol, callbacks=list(callbacks))
+        # evaluate_icp never reads cloud_history/matching_history.
+        icp = ICP(matcher=matcher, max_iter=max_iter, tol=tol, callbacks=list(callbacks), record_history=False)
         if use_multistart:
             return MultiStartICP(icp=icp, n_starts=n_starts, n_jobs=multistart_n_jobs, verbose=False)
         return icp
