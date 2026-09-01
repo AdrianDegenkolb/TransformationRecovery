@@ -45,7 +45,7 @@ def test_entirely_large_cluster_collapses_to_centroid() -> None:
     """A single cloud whose points are all one large cluster is replaced by its centroid."""
     cloud = _cloud(10)
     clusterer = _FakeClusterer(np.zeros(10, dtype=np.int64))
-    trimmer = ClusteringTrimmer(_IdentityExtractor(), clusterer, min_cluster_fraction=0.5)
+    trimmer = ClusteringTrimmer(_IdentityExtractor(), clusterer, min_cluster_fraction=0.5, min_points=1)
 
     result = trimmer.trim(cloud)
 
@@ -92,7 +92,7 @@ def test_multi_cloud_clustering_is_joint_not_per_cloud() -> None:
     # though it is only 4/6 = 0.67 of A and 2/4 = 0.5 of B individually.
     joint_labels = np.array([0, 0, 0, 0, -1, -1] + [0, 0, -1, -1], dtype=np.int64)
     clusterer = _FakeClusterer(joint_labels)
-    trimmer = ClusteringTrimmer(_IdentityExtractor(), clusterer, min_cluster_fraction=0.5)
+    trimmer = ClusteringTrimmer(_IdentityExtractor(), clusterer, min_cluster_fraction=0.5, min_points=1)
 
     result_a, result_b = trimmer.trim([cloud_a, cloud_b])
 
@@ -111,7 +111,7 @@ def test_large_cluster_absent_from_one_cloud_does_not_crash() -> None:
     joint_labels = np.array([0] * 10 + [1] * 10, dtype=np.int64)
     clusterer = _FakeClusterer(joint_labels)
     # Each label is 10/20 = 0.5 of the pooled total -> both "large" under a 0.4 threshold.
-    trimmer = ClusteringTrimmer(_IdentityExtractor(), clusterer, min_cluster_fraction=0.4)
+    trimmer = ClusteringTrimmer(_IdentityExtractor(), clusterer, min_cluster_fraction=0.4, min_points=1)
 
     result_a, result_b = trimmer.trim([cloud_a, cloud_b])
 
