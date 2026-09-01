@@ -16,9 +16,10 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
 from algebra_utils import rotation_angle
+from error_metrics import true_residuals as compute_true_residuals
 from icp import ICPResult, MultiStartICPResult
 from point_cloud import PointCloud
-from transformation import RigidTransformation
+from synthetic import SyntheticExperiment
 
 _DEFAULT_COLORS: list[str] = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red', 'tab:purple']
 
@@ -245,7 +246,7 @@ class ErrorMetricsVisualizer:
     def plot_rot_error_per_iterations(
         axis: Axes,
         results_per_method: list[list[ICPResult | MultiStartICPResult]],
-        ground_truths_per_method: list[list[RigidTransformation]],
+        experiments_per_method: list[list[SyntheticExperiment]],
         method_labels: list[str],
         colors: list[str] | None = None,
         x_label: str = 'Iteration',
@@ -253,23 +254,23 @@ class ErrorMetricsVisualizer:
         """Plot per-iteration rotation error as mean ± 1 std shaded bands for each method.
 
         Args:
-            axis:                     Axes to draw on.
-            results_per_method:       Per-seed ICPResult lists, one per method.
-            ground_truths_per_method: Per-seed ground-truth transformations, matching
-                                      the structure of ``results_per_method``.
-            method_labels:            Legend label per method.
-            colors:                   Line/fill color per method. Defaults to tab palette.
-            x_label:                  X-axis label.
+            axis:                    Axes to draw on.
+            results_per_method:      Per-seed ICPResult lists, one per method.
+            experiments_per_method:  Per-seed SyntheticExperiments (for T_gt), matching
+                                     the structure of ``results_per_method``.
+            method_labels:           Legend label per method.
+            colors:                  Line/fill color per method. Defaults to tab palette.
+            x_label:                 X-axis label.
         """
         if colors is None:
             colors = _DEFAULT_COLORS[:len(method_labels)]
 
-        for results, ground_truths, label, color in zip(
-            results_per_method, ground_truths_per_method, method_labels, colors
+        for results, experiments, label, color in zip(
+            results_per_method, experiments_per_method, method_labels, colors
         ):
             trajectories = [
-                np.array([rotation_angle(T_gt.R, T.R) for T in result.transform_history])
-                for result, T_gt in zip(results, ground_truths)
+                np.array([rotation_angle(exp.T_gt.R, T.R) for T in result.transform_history])
+                for result, exp in zip(results, experiments)
             ]
             _plot_shaded_band(
                 axis, trajectories, label, color,
@@ -283,7 +284,7 @@ class ErrorMetricsVisualizer:
     def plot_translation_error_per_iterations(
         axis: Axes,
         results_per_method: list[list[ICPResult | MultiStartICPResult]],
-        ground_truths_per_method: list[list[RigidTransformation]],
+        experiments_per_method: list[list[SyntheticExperiment]],
         method_labels: list[str],
         colors: list[str] | None = None,
         x_label: str = 'Iteration',
@@ -291,28 +292,74 @@ class ErrorMetricsVisualizer:
         """Plot per-iteration translation error as mean ± 1 std shaded bands for each method.
 
         Args:
-            axis:                     Axes to draw on.
-            results_per_method:       Per-seed ICPResult lists, one per method.
-            ground_truths_per_method: Per-seed ground-truth transformations, matching
-                                      the structure of ``results_per_method``.
-            method_labels:            Legend label per method.
-            colors:                   Line/fill color per method. Defaults to tab palette.
-            x_label:                  X-axis label.
+            axis:                    Axes to draw on.
+            results_per_method:      Per-seed ICPResult lists, one per method.
+            experiments_per_method:  Per-seed SyntheticExperiments (for T_gt), matching
+                                     the structure of ``results_per_method``.
+            method_labels:           Legend label per method.
+            colors:                  Line/fill color per method. Defaults to tab palette.
+            x_label:                 X-axis label.
         """
         if colors is None:
             colors = _DEFAULT_COLORS[:len(method_labels)]
 
-        for results, ground_truths, label, color in zip(
-            results_per_method, ground_truths_per_method, method_labels, colors
+        for results, experiments, label, color in zip(
+            results_per_method, experiments_per_method, method_labels, colors
         ):
             trajectories = [
-                np.array([float(np.linalg.norm(T_gt.t - T.t)) for T in result.transform_history])
-                for result, T_gt in zip(results, ground_truths)
+                np.array([float(np.linalg.norm(exp.T_gt.t - T.t)) for T in result.transform_history])
+                for result, exp in zip(results, experiments)
             ]
             _plot_shaded_band(
                 axis, trajectories, label, color,
                 ylabel='Translation error',
                 title='Translation error vs. ground truth',
+                x_label=x_label,
+            )
+        axis.legend()
+
+    @staticmethod
+    def plot_true_residual_errors_per_iteration(
+        axis: Axes,
+        results_per_method: list[list[ICPResult | MultiStartICPResult]],
+        experiments_per_method: list[list[SyntheticExperiment]],
+        method_labels: list[str],
+        colors: list[str] | None = None,
+        x_label: str = 'Iteration',
+    ) -> None:
+        """Plot per-iteration true residual as mean ± 1 std shaded bands for each method.
+
+        True residual uses each experiment's known ground-truth correspondence
+        (experiment.P/experiment.Q), applying that iteration's accumulated transform —
+        unlike the closest-point residual ICP actually optimizes, this can only be
+        computed for synthetic experiments with known correspondence.
+
+        Args:
+            axis:                    Axes to draw on.
+            results_per_method:      Per-seed ICPResult lists, one per method.
+            experiments_per_method:  Per-seed SyntheticExperiments (for P/Q), matching
+                                     the structure of ``results_per_method``.
+            method_labels:           Legend label per method.
+            colors:                  Line/fill color per method. Defaults to tab palette.
+            x_label:                 X-axis label.
+        """
+        if colors is None:
+            colors = _DEFAULT_COLORS[:len(method_labels)]
+
+        for results, experiments, label, color in zip(
+            results_per_method, experiments_per_method, method_labels, colors
+        ):
+            trajectories = [
+                np.array([
+                    float(compute_true_residuals(T.apply(exp.P), exp.Q).mean())
+                    for T in result.transform_history
+                ])
+                for result, exp in zip(results, experiments)
+            ]
+            _plot_shaded_band(
+                axis, trajectories, label, color,
+                ylabel='True residual',
+                title='True residual',
                 x_label=x_label,
             )
         axis.legend()
@@ -383,34 +430,36 @@ class ErrorMetricsVisualizer:
     def plot_convergence(
         cls,
         results_per_method: list[list[ICPResult | MultiStartICPResult]],
-        ground_truths_per_method: list[list[RigidTransformation]],
+        experiments_per_method: list[list[SyntheticExperiment]],
         method_labels: list[str],
         colors: list[str] | None = None,
         x_label: str = 'Iteration',
     ) -> None:
-        """Plot a 1×4 figure of per-iteration error trajectories as mean ± 1 std shaded bands.
+        """Plot a 1×5 figure of per-iteration error trajectories as mean ± 1 std shaded bands.
 
-        Creates subplots for rotation error, translation error, mean residuals, and
-        convergence deltas, then delegates to the respective sub-methods.
+        Creates subplots for true residual, rotation error, translation error, mean
+        residuals (ICP's own internal per-iteration residual), and convergence deltas,
+        then delegates to the respective sub-methods.
 
         Args:
-            results_per_method:       Iterable of per-seed ICPResult lists, one per method.
-            ground_truths_per_method: Iterable of per-seed ground-truth RigidTransformation
-                                      lists, matching ``results_per_method``.
-            method_labels:            Legend label per method.
-            colors:                   Line/fill color per method. Defaults to tab palette.
-            x_label:                  Shared x-axis label.
+            results_per_method:      Iterable of per-seed ICPResult lists, one per method.
+            experiments_per_method:  Iterable of per-seed SyntheticExperiment lists,
+                                     matching ``results_per_method``.
+            method_labels:           Legend label per method.
+            colors:                  Line/fill color per method. Defaults to tab palette.
+            x_label:                 Shared x-axis label.
         Return:
             fig, axes
         """
         import matplotlib.pyplot as plt
 
-        fig, axes = plt.subplots(1, 4, figsize=(20, 4))
+        fig, axes = plt.subplots(1, 5, figsize=(24, 4))
 
-        cls.plot_rot_error_per_iterations(axes[0], results_per_method, ground_truths_per_method, method_labels, colors, x_label)
-        cls.plot_translation_error_per_iterations(axes[1], results_per_method, ground_truths_per_method, method_labels, colors, x_label)
-        cls.plot_residual_errors_per_iteration(axes[2], results_per_method, method_labels, colors, x_label)
-        cls.plot_delta_per_iterations(axes[3], results_per_method, method_labels, colors, x_label)
+        cls.plot_true_residual_errors_per_iteration(axes[0], results_per_method, experiments_per_method, method_labels, colors, x_label)
+        cls.plot_rot_error_per_iterations(axes[1], results_per_method, experiments_per_method, method_labels, colors, x_label)
+        cls.plot_translation_error_per_iterations(axes[2], results_per_method, experiments_per_method, method_labels, colors, x_label)
+        cls.plot_residual_errors_per_iteration(axes[3], results_per_method, method_labels, colors, x_label)
+        cls.plot_delta_per_iterations(axes[4], results_per_method, method_labels, colors, x_label)
 
         return fig, axes
 
@@ -418,20 +467,20 @@ class ErrorMetricsVisualizer:
     def plot_hists_over_seeds(
         rot_errors_per_method: list[NDArray[np.float64]],
         translation_errors_per_method: list[NDArray[np.float64]],
-        residuals_per_method: list[NDArray[np.float64]],
+        closest_point_residuals_per_method: list[NDArray[np.float64]],
         method_labels: list[str] | None = None,
         method_colors: list[str] | None = None,
     ) -> tuple[Figure, NDArray[np.float64]]:
-        """Histograms of rotation error, translation error, and residual distributions.
+        """Histograms of rotation error, translation error, and closest-point residual distributions.
 
         Creates a 1×3 figure with one overlaid histogram per metric.
 
         Args:
-            rot_errors_per_method:         1D rotation error array per method.
-            translation_errors_per_method: 1D translation error array per method.
-            residuals_per_method:          1D residual array per method.
-            method_labels:                 Legend label per method.
-            method_colors:                 Bar color per method. Defaults to tab palette.
+            rot_errors_per_method:              1D rotation error array per method.
+            translation_errors_per_method:       1D translation error array per method.
+            closest_point_residuals_per_method:  1D closest-point residual array per method.
+            method_labels:                       Legend label per method.
+            method_colors:                       Bar color per method. Defaults to tab palette.
 
         Returns:
             fig, axes
@@ -441,7 +490,7 @@ class ErrorMetricsVisualizer:
         fig, axes = plt.subplots(1, 3, figsize=(12, 5))
         _plot_hist(axes[0], rot_errors_per_method, 'Rotation error (°)', 'Rotation Error', method_labels, method_colors)
         _plot_hist(axes[1], translation_errors_per_method, 'Translation error', 'Translation Error', method_labels, method_colors)
-        _plot_hist(axes[2], residuals_per_method, 'Residual', 'Residuals', method_labels, method_colors)
+        _plot_hist(axes[2], closest_point_residuals_per_method, 'Closest-point residual', 'Closest-point Residuals', method_labels, method_colors)
         return fig, axes
 
     @staticmethod
@@ -497,23 +546,23 @@ class ResidualVisualizer:
         colors: list[str] | None = None,
         alpha: float = 0.6,
     ) -> None:
-        """Overlay residual histograms for one or more methods.
+        """Overlay closest-point residual histograms for one or more methods.
 
         Args:
-            ax:                   Axes to draw on.
-            residuals_per_method: 1D residual array per method.
-            labels:               Legend label per method.
-            bins:                 Number of histogram bins.
-            colors:               Bar color per method. Defaults to tab palette.
-            alpha:                Bar transparency.
+            ax:                                  Axes to draw on.
+            residuals_per_method:  1D closest-point residual array per method.
+            labels:                              Legend label per method.
+            bins:                                Number of histogram bins.
+            colors:                              Bar color per method. Defaults to tab palette.
+            alpha:                               Bar transparency.
         """
         if colors is None:
             colors = _DEFAULT_COLORS[:len(residuals_per_method)]
         for data, label, color in zip(residuals_per_method, labels, colors):
             ax.hist(data, bins=bins, alpha=alpha, label=label, color=color)
-        ax.set_xlabel('Point residual')
+        ax.set_xlabel('Residual')
         ax.set_ylabel('Count')
-        ax.set_title('Point residuals P → Q')
+        ax.set_title('Residuals P → Q')
         ax.legend()
 
     @staticmethod
