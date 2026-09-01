@@ -220,6 +220,7 @@ def evaluate_icp(
     gen_kwargs: dict[str, Any],
     trimmer: Trimmer | None = None,
     dropout_prob: float = 0.0,
+    n_jobs: int = 1,
 ) -> dict[str, float]:
     """Evaluate an ICP configuration over multiple random seeds.
 
@@ -239,6 +240,9 @@ def evaluate_icp(
                       Must not contain 'style' or 'seed'.
         trimmer:      Optional trimmer applied to (P, Q) before each ICP call.
         dropout_prob: Probability of dropping individual points from the observation.
+        n_jobs:       Worker processes for parallelizing across seeds. Keep the
+                      icp_factory's own MultiStartICP (if any) at n_jobs=1 when
+                      using this, since nesting pools oversubscribes CPU cores.
 
     Returns:
         Dictionary with:
@@ -254,6 +258,7 @@ def evaluate_icp(
     result = fit_multi_seed(
         icp, seeds=seeds, dropout_prob=dropout_prob, verbose=False,
         trimmer=trimmer, experiment_kwargs={**gen_kwargs, "style": style},
+        n_jobs=n_jobs,
     )
 
     rot_arr = np.array(result.rotation_errors)
@@ -276,6 +281,7 @@ def make_objective(
     tol: float,
     dropout_prob: float = 0.0,
     multistart_n_jobs: int = 1,
+    n_jobs: int = 1,
 ) -> Callable[[optuna.Trial], float]:
     """Create an Optuna single-objective function for a given cloud style.
 
@@ -298,6 +304,10 @@ def make_objective(
                             applied identically across all trials so the search optimizes
                             for this noise regime rather than only the clean case.
         multistart_n_jobs:  Worker processes for MultiStartICP trials. See build_icp_factory.
+                            Keep at 1 when n_jobs != 1, since nesting pools
+                            oversubscribes CPU cores.
+        n_jobs:             Worker processes for parallelizing evaluate_icp across
+                            seeds within each trial. See evaluate_icp.
 
     Returns:
         Callable (trial) -> mean_true_residual.
@@ -305,7 +315,7 @@ def make_objective(
     def objective(trial: optuna.Trial) -> float:
         factory = build_icp_factory(trial, max_iter, tol, multistart_n_jobs=multistart_n_jobs)
         trimmer = build_trimmer(trial, n=gen_kwargs.get("n", 2000))
-        metrics = evaluate_icp(factory, style, seeds, gen_kwargs, trimmer=trimmer, dropout_prob=dropout_prob)
+        metrics = evaluate_icp(factory, style, seeds, gen_kwargs, trimmer=trimmer, dropout_prob=dropout_prob, n_jobs=n_jobs)
         trial.set_user_attr("mean_rot_err", metrics["mean_rot_err"])
         trial.set_user_attr("mean_t_err", metrics["mean_t_err"])
         trial.set_user_attr("mean_duration_s", metrics["mean_duration_s"])

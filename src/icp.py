@@ -349,22 +349,35 @@ class MultiStartICP:
         all_results: list[ICPResult] = []
         all_rotations: list[NDArray[np.float64]] = []
 
-        max_workers = self.n_jobs if self.n_jobs > 0 else None
         t0 = time.perf_counter()
         pbar = tqdm(total=self.n_starts, desc=f"Testing {self.n_starts} starting configurations", disable=not self.verbose)
-        with ProcessPoolExecutor(max_workers=max_workers) as pool:
-            futures = {
-                pool.submit(self._run_single, self.icp, source, target, R): R
-                for R in rotations
-            }
-            for future in as_completed(futures):
+        if self.n_jobs == 1:
+            # Run in-process rather than via a one-worker ProcessPoolExecutor:
+            # a pool buys no parallelism here and only adds spawn/pickling
+            # overhead, which matters when fit() is called many times (e.g.
+            # once per seed per HPO trial).
+            for R in rotations:
                 pbar.update(1)
-                result, R_init = future.result()
+                result, R_init = self._run_single(self.icp, source, target, R)
                 all_results.append(result)
                 all_rotations.append(R_init)
                 if result.converged and result.mean_residuals[-1] < self.residual_threshold:
-                    pool.shutdown(cancel_futures=True)
                     break
+        else:
+            max_workers = self.n_jobs if self.n_jobs > 0 else None
+            with ProcessPoolExecutor(max_workers=max_workers) as pool:
+                futures = {
+                    pool.submit(self._run_single, self.icp, source, target, R): R
+                    for R in rotations
+                }
+                for future in as_completed(futures):
+                    pbar.update(1)
+                    result, R_init = future.result()
+                    all_results.append(result)
+                    all_rotations.append(R_init)
+                    if result.converged and result.mean_residuals[-1] < self.residual_threshold:
+                        pool.shutdown(cancel_futures=True)
+                        break
 
         pbar.close()
         best_idx = int(np.argmin([r.mean_residuals[-1] for r in all_results]))
