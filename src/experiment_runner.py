@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -144,6 +145,26 @@ def _quiet(icp: ICP | MultiStartICP) -> Generator[None, None, None]:
             t.verbose = original
 
 
+def _fit_one_seed(
+    icp: ICP | MultiStartICP,
+    seed: int,
+    dropout_prob: float,
+    trimmer: Trimmer | None,
+    experiment_kwargs: dict[str, Any],
+) -> tuple[int, SyntheticExperiment, ICPResult | MultiStartICPResult]:
+    """Generate and solve a single seed's experiment.
+
+    Module-level (rather than a closure in fit_multi_seed) so it can be pickled
+    and sent to worker processes by ProcessPoolExecutor.
+    """
+    exp = SyntheticExperiment.generate(**experiment_kwargs, seed=seed)
+    p, q = exp.observe_point_clouds(dropout_prob)
+    if trimmer is not None:
+        p, q = trimmer.trim([p, q])
+    result = icp.fit(p, q)
+    return seed, exp, result
+
+
 def fit_multi_seed(
     icp: ICP | MultiStartICP,
     seeds: list[int],
@@ -151,6 +172,7 @@ def fit_multi_seed(
     verbose: bool = True,
     trimmer: Trimmer | None = None,
     experiment_kwargs: dict[str, Any] | None = None,
+    n_jobs: int = 1,
 ) -> MultiSeedSyntheticICPResult:
     """Generate and solve a synthetic experiment per seed and report the results.
 
@@ -161,19 +183,39 @@ def fit_multi_seed(
         verbose:           Show seed progress bar if True.
         trimmer:           Optional trimmer applied to (P, Q) before each ICP call.
         experiment_kwargs: Keyword arguments forwarded to SyntheticExperiment.generate.
+        n_jobs:            Worker processes for parallelizing across seeds. 1 (default)
+                            runs sequentially in-process. -1
+                            uses os.cpu_count(). If `icp` is a MultiStartICP, its own
+                            `n_jobs` already parallelizes across starts within a single
+                            seed; combining that with n_jobs != 1 here nests process
+                            pools and oversubscribes CPU cores, so parallelize only one
+                            of the two loops.
 
     Returns:
         MultiSeedSyntheticICPResult with one experiment and result per seed.
     """
-    results: dict[int, tuple[SyntheticExperiment, ICPResult | MultiStartICPResult]] = {}
     experiment_kwargs = experiment_kwargs or {}
+
     with _quiet(icp):
-        for seed in tqdm(seeds, desc=f"Solving {len(seeds)} seeds", disable=not verbose):
-            exp = SyntheticExperiment.generate(**experiment_kwargs, seed=seed)
-            p, q = exp.observe_point_clouds(dropout_prob)
-            if trimmer is not None:
-                p, q = trimmer.trim([p, q])
-            result = icp.fit(p, q)
-            results[seed] = (exp, result)
+        if n_jobs == 1:
+            results: dict[int, tuple[SyntheticExperiment, ICPResult | MultiStartICPResult]] = {}
+            for seed in tqdm(seeds, desc=f"Solving {len(seeds)} seeds", disable=not verbose):
+                _, exp, result = _fit_one_seed(icp, seed, dropout_prob, trimmer, experiment_kwargs)
+                results[seed] = (exp, result)
+        else:
+            max_workers = n_jobs if n_jobs > 0 else None
+            with ProcessPoolExecutor(max_workers=max_workers) as pool:
+                future_to_seed = {
+                    pool.submit(_fit_one_seed, icp, seed, dropout_prob, trimmer, experiment_kwargs): seed
+                    for seed in seeds
+                }
+                unordered: dict[int, tuple[SyntheticExperiment, ICPResult | MultiStartICPResult]] = {}
+                for future in tqdm(
+                    as_completed(future_to_seed), total=len(seeds), desc=f"Solving {len(seeds)} seeds", disable=not verbose
+                ):
+                    _, exp, result = future.result()
+                    unordered[future_to_seed[future]] = (exp, result)
+            # Re-order to match the input seed order, independent of completion order.
+            results = {seed: unordered[seed] for seed in seeds}
 
     return MultiSeedSyntheticICPResult(results)

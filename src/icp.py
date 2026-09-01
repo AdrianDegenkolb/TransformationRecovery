@@ -148,9 +148,13 @@ class MultiStartICPResult:
         return self.individual_durations_summed / self.duration_s * self.num_workers
 
     def __getattr__(self, name: str):
-        # forward attribute access to the best result
-        if hasattr(self.best, name):
-            return getattr(self.best, name)
+        # Forward attribute access to the best result. Look `best` up via
+        # __dict__ directly (not self.best) to avoid infinite recursion: pickle
+        # probes for dunder methods like __setstate__ on a bare instance before
+        # `best` is set, and a plain `self.best` would re-enter __getattr__.
+        best = self.__dict__.get("best")
+        if best is not None and hasattr(best, name):
+            return getattr(best, name)
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
 def _windowed_delta(
