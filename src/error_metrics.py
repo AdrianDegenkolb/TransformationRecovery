@@ -9,6 +9,7 @@ in icp.py, experiment_runner.py, and utils.py.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
@@ -19,6 +20,9 @@ from matcher import Matching, NearestNeighborMatcher
 from point_cloud import PointCloud
 from synthetic import SyntheticExperiment
 from transformation import RigidTransformation
+
+if TYPE_CHECKING:
+    from icp import ICPResult, MultiStartICPResult
 
 
 def get_residuals(matching: Matching, transformed_source: PointCloud) -> NDArray[np.float64]:
@@ -108,3 +112,17 @@ def get_error_metrics(
     true_res = true_residuals(transformation.apply(experiment.P), experiment.Q)
 
     return ErrorMetrics(rot_err, t_err, closest_point_residuals, true_res)
+
+
+def convergence_ratio(icp_results: list[ICPResult | MultiStartICPResult]) -> float:
+    """
+    Returns the fraction of runs that have converged to a solution.
+    """
+    return sum(r.converged for r in icp_results) / len(icp_results)
+
+
+def convergence_to_global_opt_ratio(icp_results: list[ICPResult | MultiStartICPResult], tol: float = 1e-3) -> float:
+    """
+    Returns the fraction of runs that have converged to the globally optimal solution. This is measured by small residual errors.
+    """
+    return sum(r.mean_residuals[-1] < tol for r in icp_results) / len(icp_results)
