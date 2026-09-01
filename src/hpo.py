@@ -97,6 +97,7 @@ def build_icp_factory(
     max_iter: int,
     tol: float,
     multistart_n_jobs: int = 1,
+    multistart_seed: int | None = 0,
 ) -> Callable[[], ICP | MultiStartICP]:
     """Suggest hyperparameters from trial and return a factory for a fresh ICP/MultiStartICP.
 
@@ -125,6 +126,11 @@ def build_icp_factory(
         multistart_n_jobs:  Worker processes for MultiStartICP when use_multistart
                             is chosen. Defaults to 1 (no nested process pool) since
                             HPO trials may themselves already run in parallel.
+        multistart_seed:    Seed for MultiStartICP's starting-rotation sampling.
+                            Defaults to 0 (not None) so multistart draws are
+                            deterministic and identical across every trial/seed —
+                            otherwise they'd be an uncontrolled noise source on top
+                            of the intentional fixed-seed comparison across trials.
 
     Returns:
         Zero-argument callable that creates a fresh, configured ICP or MultiStartICP instance.
@@ -138,7 +144,10 @@ def build_icp_factory(
         # evaluate_icp never reads cloud_history/matching_history.
         icp = ICP(matcher=matcher, max_iter=max_iter, tol=tol, callbacks=list(callbacks), record_history=False)
         if use_multistart:
-            return MultiStartICP(icp=icp, n_starts=n_starts, n_jobs=multistart_n_jobs, verbose=False)
+            return MultiStartICP(
+                icp=icp, n_starts=n_starts, n_jobs=multistart_n_jobs,
+                seed=multistart_seed, verbose=False,
+            )
         return icp
 
     return factory
@@ -200,7 +209,7 @@ def build_trimmer(trial: optuna.Trial, n: int) -> Trimmer | None:
 def evaluate_icp(
     icp_factory: Callable[[], ICP | MultiStartICP],
     style: CloudStyle,
-    n_seeds: int,
+    seeds: list[int],
     gen_kwargs: dict[str, Any],
     trimmer: Trimmer | None = None,
     dropout_prob: float = 0.0,
@@ -216,7 +225,9 @@ def evaluate_icp(
                       (matches fit_multi_seed's contract elsewhere in the codebase).
         style:        Cloud geometry, see CloudStyle ('random', 'clustered',
                       'lattice', '2d-lattice', 'muscle-fiber').
-        n_seeds:      Number of seeds to average over. Seeds 0..n_seeds-1 are used.
+        seeds:        Random seeds to average over. Passed explicitly (rather than
+                      just a count) so callers can use disjoint seed sets for tuning
+                      vs. held-out evaluation.
         gen_kwargs:   Kwargs for SyntheticExperiment.generate (n, noise_std, t_scale, ...).
                       Must not contain 'style' or 'seed'.
         trimmer:      Optional trimmer applied to (P, Q) before each ICP call.
@@ -224,14 +235,17 @@ def evaluate_icp(
 
     Returns:
         Dictionary with:
-            mean_rot_err:   Mean rotation error in degrees across seeds.
-            mean_t_err:     Mean translation error across seeds.
-            mean_duration_s: Mean wall-clock fit duration across seeds.
-            reliability:    Fraction of seeds where rotation error < 5°.
+            mean_true_residual: Mean ground-truth point-to-point distance across seeds
+                                 (T_pred(P) vs Q, using known correspondence — see
+                                 MultiSeedSyntheticICPResult.mean_true_residuals).
+            mean_rot_err:        Mean rotation error in degrees across seeds.
+            mean_t_err:          Mean translation error across seeds.
+            mean_duration_s:     Mean wall-clock fit duration across seeds.
+            reliability:         Fraction of seeds where rotation error < 5°.
     """
     icp = icp_factory()
     result = fit_multi_seed(
-        icp, seeds=list(range(n_seeds)), dropout_prob=dropout_prob, verbose=False,
+        icp, seeds=seeds, dropout_prob=dropout_prob, verbose=False,
         trimmer=trimmer, experiment_kwargs={**gen_kwargs, "style": style},
     )
 
@@ -239,34 +253,37 @@ def evaluate_icp(
     t_arr = np.array(result.translation_errors)
     duration_arr = np.array(result.durations_s)
     return {
-        "mean_rot_err":    float(rot_arr.mean()),
-        "mean_t_err":      float(t_arr.mean()),
-        "mean_duration_s": float(duration_arr.mean()),
-        "reliability":     float((rot_arr < 5.0).mean()),
+        "mean_true_residual": float(np.mean(result.mean_true_residuals)),
+        "mean_rot_err":        float(rot_arr.mean()),
+        "mean_t_err":          float(t_arr.mean()),
+        "mean_duration_s":     float(duration_arr.mean()),
+        "reliability":         float((rot_arr < 5.0).mean()),
     }
 
 
 def make_objective(
     style: CloudStyle,
-    n_seeds: int,
+    seeds: list[int],
     gen_kwargs: dict[str, Any],
     max_iter: int,
     tol: float,
     dropout_prob: float = 0.0,
     multistart_n_jobs: int = 1,
-) -> Callable[[optuna.Trial], tuple[float, float, float]]:
-    """Create an Optuna multi-objective function for a given cloud style.
+) -> Callable[[optuna.Trial], float]:
+    """Create an Optuna single-objective function for a given cloud style.
 
-    All three objectives are minimized: (mean_rot_err, mean_t_err, mean_duration_s).
-    Including runtime as an objective (rather than only a tracked attribute) lets
-    the Pareto front prefer the faster of two configurations that reach the same
-    accuracy — e.g. fewer MultiStartICP starts when they're not needed for a
-    given style. Reliability is stored as a trial user attribute for post-hoc
-    inspection; it isn't itself optimized.
+    Minimizes mean_true_residual — the mean ground-truth point-to-point distance
+    (T_pred(P) vs Q via known correspondence, see
+    MultiSeedSyntheticICPResult.mean_true_residuals). This combines rotation and
+    translation error into one geometrically meaningful, correctly-scaled number,
+    rather than optimizing degrees and raw distance units as separate objectives.
+    Rotation error, translation error, duration, and reliability are all stored as
+    trial user attributes for post-hoc inspection; none of them are optimized
+    directly.
 
     Args:
         style:              Cloud geometry for SyntheticExperiment.generate.
-        n_seeds:            Number of seeds per trial.
+        seeds:              Random seeds to average each trial over.
         gen_kwargs:         Kwargs for SyntheticExperiment.generate (n, noise_std, t_scale, ...).
         max_iter:           Fixed ICP max_iter.
         tol:                Fixed ICP tol.
@@ -276,13 +293,16 @@ def make_objective(
         multistart_n_jobs:  Worker processes for MultiStartICP trials. See build_icp_factory.
 
     Returns:
-        Callable (trial) -> (mean_rot_err, mean_t_err, mean_duration_s).
+        Callable (trial) -> mean_true_residual.
     """
-    def objective(trial: optuna.Trial) -> tuple[float, float, float]:
+    def objective(trial: optuna.Trial) -> float:
         factory = build_icp_factory(trial, max_iter, tol, multistart_n_jobs=multistart_n_jobs)
         trimmer = build_trimmer(trial, n=gen_kwargs.get("n", 2000))
-        metrics = evaluate_icp(factory, style, n_seeds, gen_kwargs, trimmer=trimmer, dropout_prob=dropout_prob)
+        metrics = evaluate_icp(factory, style, seeds, gen_kwargs, trimmer=trimmer, dropout_prob=dropout_prob)
+        trial.set_user_attr("mean_rot_err", metrics["mean_rot_err"])
+        trial.set_user_attr("mean_t_err", metrics["mean_t_err"])
+        trial.set_user_attr("mean_duration_s", metrics["mean_duration_s"])
         trial.set_user_attr("reliability", metrics["reliability"])
-        return metrics["mean_rot_err"], metrics["mean_t_err"], metrics["mean_duration_s"]
+        return metrics["mean_true_residual"]
 
     return objective

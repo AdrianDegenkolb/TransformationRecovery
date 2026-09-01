@@ -89,6 +89,34 @@ class MultiSeedSyntheticICPResult:
         """
         return [res.mean() for res in self.residuals]
 
+    @cached_property
+    def true_residuals(self) -> list[NDArray[np.float64]]:
+        """
+        A list of per-point true residuals, one array per seed.
+
+        Unlike `residuals`, this needs no nearest-neighbor matching: P and Q share
+        point-for-point ground-truth correspondence by construction (both are
+        transformations of the same source cloud S, see SyntheticExperiment.generate),
+        and that correspondence survives dropout because `observe_point_clouds` only
+        drops points from the copies used for fitting, leaving exp.P/exp.Q full-length
+        and index-aligned. So the true residual is directly
+        ||T_pred(exp.P)_i - exp.Q_i||. Only meaningful for synthetic experiments with
+        known correspondence; real-world data would need `residuals` instead.
+        """
+        acc: list[NDArray[np.float64]] = []
+        for exp, result in self.r.values():
+            q_pred = result.transformation.apply(exp.P)
+            residual = np.linalg.norm(q_pred.points - exp.Q.points, axis=1)
+            acc.append(residual)
+        return acc
+
+    @cached_property
+    def mean_true_residuals(self) -> list[float]:
+        """
+        A list of mean true-residual errors, one per seed
+        """
+        return [res.mean() for res in self.true_residuals]
+
     @property
     def durations_s(self) -> list[float]:
         """
