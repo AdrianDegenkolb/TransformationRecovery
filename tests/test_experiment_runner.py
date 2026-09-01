@@ -29,25 +29,25 @@ def test_getitem_returns_stored_entry():
     assert result[0] is entry
 
 
-def test_residuals_are_cached_not_recomputed():
+def test_closest_point_residuals_are_cached_not_recomputed():
     exp = SyntheticExperiment.generate(n=20, seed=0)
     icp_result = _make_result()
     icp_result.transformation = exp.T_gt
     ms_result = MultiSeedSyntheticICPResult({0: (exp, icp_result)})
 
-    first = ms_result.residuals
-    second = ms_result.residuals
+    first = ms_result.closest_point_residuals
+    second = ms_result.closest_point_residuals
     assert first is second
 
 
-def test_mean_residuals_reuses_cached_residuals():
+def test_mean_closest_point_residuals_reuses_cached_residuals():
     exp = SyntheticExperiment.generate(n=20, seed=0)
     icp_result = _make_result()
     icp_result.transformation = exp.T_gt
     ms_result = MultiSeedSyntheticICPResult({0: (exp, icp_result)})
 
-    _ = ms_result.mean_residuals
-    assert 'residuals' in ms_result.__dict__
+    _ = ms_result.mean_closest_point_residuals
+    assert 'closest_point_residuals' in ms_result.__dict__
 
 
 def test_quiet_restores_verbose_after_normal_exit():

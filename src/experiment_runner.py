@@ -13,8 +13,8 @@ from numpy.typing import NDArray
 from tqdm import tqdm
 
 from algebra_utils import rotation_angle
+from error_metrics import nearest_neighbor_residuals, true_residuals as compute_true_residuals
 from icp import ICP, ICPResult, MultiStartICP, MultiStartICPResult
-from matcher import NearestNeighborMatcher
 from synthetic import SyntheticExperiment
 from transformation import RigidTransformation
 from trimmer import Trimmer
@@ -66,49 +66,46 @@ class MultiSeedSyntheticICPResult:
         return [float(np.linalg.norm(res.transformation.t - gt.t)) for res, gt in zip(self.results, self.ground_truths)]
 
     @cached_property
-    def residuals(self) -> list[NDArray[np.float64]]:
+    def closest_point_residuals(self) -> list[NDArray[np.float64]]:
         """
-        A list of residuals, one array per seed.
+        A list of closest-point (nearest-neighbor-matched) residuals, one array per seed.
 
         Cached: computing this re-matches every seed's aligned cloud against its
-        target via a fresh KDTree, which isn't cheap. `mean_residuals` depends on
-        this property, so without caching, using both would redo the matching twice.
+        target via a fresh KDTree, which isn't cheap. `mean_closest_point_residuals`
+        depends on this property, so without caching, using both would redo the
+        matching twice.
         """
-        acc: list[NDArray[np.float64]] = []
-        for exp, result in self.r.values():
-            q_pred = result.transformation.apply(exp.P)
-            nearest_matching = NearestNeighborMatcher().match(q_pred, exp.Q)
-            residual = np.linalg.norm(nearest_matching.source_points - nearest_matching.target_positions, axis=1)
-            acc.append(residual)
-        return acc
+        return [
+            nearest_neighbor_residuals(result.transformation.apply(exp.P), exp.Q)
+            for exp, result in self.r.values()
+        ]
 
     @cached_property
-    def mean_residuals(self) -> list[float]:
+    def mean_closest_point_residuals(self) -> list[float]:
         """
-        A list of mean residual errors, one per seed
+        A list of mean closest-point residual errors, one per seed
         """
-        return [res.mean() for res in self.residuals]
+        return [res.mean() for res in self.closest_point_residuals]
 
     @cached_property
     def true_residuals(self) -> list[NDArray[np.float64]]:
         """
         A list of per-point true residuals, one array per seed.
 
-        Unlike `residuals`, this needs no nearest-neighbor matching: P and Q share
-        point-for-point ground-truth correspondence by construction (both are
-        transformations of the same source cloud S, see SyntheticExperiment.generate),
-        and that correspondence survives dropout because `observe_point_clouds` only
-        drops points from the copies used for fitting, leaving exp.P/exp.Q full-length
-        and index-aligned. So the true residual is directly
-        ||T_pred(exp.P)_i - exp.Q_i||. Only meaningful for synthetic experiments with
-        known correspondence; real-world data would need `residuals` instead.
+        Unlike `closest_point_residuals`, this needs no nearest-neighbor matching: P
+        and Q share point-for-point ground-truth correspondence by construction (both
+        are transformations of the same source cloud S, see
+        SyntheticExperiment.generate), and that correspondence survives dropout because
+        `observe_point_clouds` only drops points from the copies used for fitting,
+        leaving exp.P/exp.Q full-length and index-aligned. So the true residual is
+        directly ||T_pred(exp.P)_i - exp.Q_i||. Only meaningful for synthetic
+        experiments with known correspondence; real-world data would need
+        `closest_point_residuals` instead.
         """
-        acc: list[NDArray[np.float64]] = []
-        for exp, result in self.r.values():
-            q_pred = result.transformation.apply(exp.P)
-            residual = np.linalg.norm(q_pred.points - exp.Q.points, axis=1)
-            acc.append(residual)
-        return acc
+        return [
+            compute_true_residuals(result.transformation.apply(exp.P), exp.Q)
+            for exp, result in self.r.values()
+        ]
 
     @cached_property
     def mean_true_residuals(self) -> list[float]:
