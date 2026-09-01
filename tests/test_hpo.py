@@ -72,7 +72,7 @@ def test_soft_matching_with_geometric_extractor_additive_mode():
 def test_multistart_wraps_icp_with_requested_n_starts():
     trial = _fixed_trial({
         "matching": "hard", "feature_extractor": "none",
-        "use_multistart": True, "n_starts": 7,
+        "use_multistart": True, "n_starts": 7, "multistart_mode": "disperse",
     })
     result = build_icp_factory(trial, max_iter=60, tol=1e-6, multistart_n_jobs=2)()
 

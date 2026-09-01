@@ -6,6 +6,7 @@ import numpy as np
 import optuna
 from sklearn.cluster import DBSCAN
 
+from algebra_utils import sample_dispersed_rotations, sample_uniform_rotations
 from experiment_runner import fit_multi_seed
 from feature_extractor import FeatureExtractor, GeometricFeatureExtractor, RobustGeometricFeatureExtractor
 from icp import ICP, ICPCallback, MultiStartICP, SigmaAnnealingCallback
@@ -114,6 +115,7 @@ def build_icp_factory(
         k:                  int [5, 30]                         (soft only; GaussianMatcher candidate count)
         use_multistart:     categorical [True, False]
         n_starts:           log-int [2, 20]                     (use_multistart only)
+        multistart_mode:    categorical ['random', 'disperse']  (use_multistart only)
 
     Calling trial.suggest_* is idempotent within a trial, so the returned factory
     can be called multiple times and will always produce consistent hyperparameter
@@ -144,9 +146,14 @@ def build_icp_factory(
         # evaluate_icp never reads cloud_history/matching_history.
         icp = ICP(matcher=matcher, max_iter=max_iter, tol=tol, callbacks=list(callbacks), record_history=False)
         if use_multistart:
+            multistart_mode = trial.suggest_categorical("multistart_mode", ["random", "disperse"])
+            if multistart_mode == "random":
+                rotation_sampler = sample_uniform_rotations
+            else:
+                rotation_sampler = sample_dispersed_rotations
             return MultiStartICP(
                 icp=icp, n_starts=n_starts, n_jobs=multistart_n_jobs,
-                seed=multistart_seed, verbose=False,
+                seed=multistart_seed, verbose=False, rotation_sampler=rotation_sampler
             )
         return icp
 
