@@ -108,24 +108,25 @@ def test_evaluate_icp_returns_all_metrics():
         "matching": "hard", "feature_extractor": "none", "use_multistart": False,
     })
     factory = build_icp_factory(trial, max_iter=20, tol=1e-6)
-    metrics = evaluate_icp(factory, style="clustered", n_seeds=2, gen_kwargs=dict(n=100, noise_std=0.0))
+    metrics = evaluate_icp(factory, style="clustered", seeds=[0, 1], gen_kwargs=dict(n=100, noise_std=0.0))
 
-    assert set(metrics.keys()) == {"mean_rot_err", "mean_t_err", "mean_duration_s", "reliability"}
+    assert set(metrics.keys()) == {
+        "mean_true_residual", "mean_rot_err", "mean_t_err", "mean_duration_s", "reliability",
+    }
     assert metrics["mean_duration_s"] > 0
     assert 0.0 <= metrics["reliability"] <= 1.0
 
 
-def test_make_objective_returns_three_objectives():
+def test_make_objective_returns_single_true_residual_objective():
     trial = _fixed_trial({
         "matching": "hard", "feature_extractor": "none", "use_multistart": False,
         "use_trimmer": False,
     })
     objective = make_objective(
-        style="clustered", n_seeds=2, gen_kwargs=dict(n=100, noise_std=0.0),
+        style="clustered", seeds=[0, 1], gen_kwargs=dict(n=100, noise_std=0.0),
         max_iter=20, tol=1e-6,
     )
-    values = objective(trial)
+    value = objective(trial)
 
-    assert len(values) == 3
-    assert all(isinstance(v, float) for v in values)
-    assert "reliability" in trial.user_attrs
+    assert isinstance(value, float)
+    assert {"mean_rot_err", "mean_t_err", "mean_duration_s", "reliability"} <= trial.user_attrs.keys()
