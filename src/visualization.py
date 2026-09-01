@@ -456,15 +456,16 @@ class ErrorMetricsVisualizer:
         fig, axes = plt.subplots(1, 5, figsize=(24, 4))
 
         cls.plot_true_residual_errors_per_iteration(axes[0], results_per_method, experiments_per_method, method_labels, colors, x_label)
-        cls.plot_rot_error_per_iterations(axes[1], results_per_method, experiments_per_method, method_labels, colors, x_label)
-        cls.plot_translation_error_per_iterations(axes[2], results_per_method, experiments_per_method, method_labels, colors, x_label)
-        cls.plot_residual_errors_per_iteration(axes[3], results_per_method, method_labels, colors, x_label)
+        cls.plot_residual_errors_per_iteration(axes[1], results_per_method, method_labels, colors, x_label)
+        cls.plot_rot_error_per_iterations(axes[2], results_per_method, experiments_per_method, method_labels, colors, x_label)
+        cls.plot_translation_error_per_iterations(axes[3], results_per_method, experiments_per_method, method_labels, colors, x_label)
         cls.plot_delta_per_iterations(axes[4], results_per_method, method_labels, colors, x_label)
 
         return fig, axes
 
     @staticmethod
     def plot_hists_over_seeds(
+        true_residuals_per_method: list[NDArray[np.float64]],
         rot_errors_per_method: list[NDArray[np.float64]],
         translation_errors_per_method: list[NDArray[np.float64]],
         closest_point_residuals_per_method: list[NDArray[np.float64]],
@@ -476,7 +477,8 @@ class ErrorMetricsVisualizer:
         Creates a 1×3 figure with one overlaid histogram per metric.
 
         Args:
-            rot_errors_per_method:              1D rotation error array per method.
+            true_residuals_per_method:           1D true residual array per method.
+            rot_errors_per_method:               1D rotation error array per method.
             translation_errors_per_method:       1D translation error array per method.
             closest_point_residuals_per_method:  1D closest-point residual array per method.
             method_labels:                       Legend label per method.
@@ -487,10 +489,11 @@ class ErrorMetricsVisualizer:
         """
         import matplotlib.pyplot as plt
 
-        fig, axes = plt.subplots(1, 3, figsize=(12, 5))
-        _plot_hist(axes[0], rot_errors_per_method, 'Rotation error (°)', 'Rotation Error', method_labels, method_colors)
-        _plot_hist(axes[1], translation_errors_per_method, 'Translation error', 'Translation Error', method_labels, method_colors)
-        _plot_hist(axes[2], closest_point_residuals_per_method, 'Closest-point residual', 'Closest-point Residuals', method_labels, method_colors)
+        fig, axes = plt.subplots(1, 4, figsize=(12, 5))
+        _plot_hist(axes[0], true_residuals_per_method, 'True Residual', 'True Residuals', method_labels, method_colors)
+        _plot_hist(axes[1], closest_point_residuals_per_method, 'Closest-point residual', 'Closest-point Residuals', method_labels, method_colors)
+        _plot_hist(axes[2], rot_errors_per_method, 'Rotation error (°)', 'Rotation Error', method_labels, method_colors)
+        _plot_hist(axes[3], translation_errors_per_method, 'Translation error', 'Translation Error', method_labels, method_colors)
         return fig, axes
 
     @staticmethod
@@ -499,6 +502,7 @@ class ErrorMetricsVisualizer:
         x: Sequence[float | int],
         data_per_metric: list[NDArray[np.float64]],
         y_labels: list[str],
+        titles: list[str] | None= None,
         x_label: str = '',
         colors: list[str] | None = None,
         label: str | None = None,
@@ -511,24 +515,27 @@ class ErrorMetricsVisualizer:
             data_per_metric: For each metric, a 2D array of shape
                              ``(len(x), n_seeds)``. Mean and std are computed
                              over seeds (``axis=1``).
-            y_labels:        Y-axis label per metric (also used as subplot title).
+            y_labels:        Y-axis label per metric.
+            titles:          Title per metric.
             x_label:         Shared x-axis label.
             colors:          Line color per metric. Defaults to tab palette.
             label:           Series label for the legend. If given, a legend is
                              drawn on each axis — pass this when overlaying
                              multiple calls (e.g. one per method) on the same axes.
         """
+        if titles is None:
+            titles = y_labels
         if colors is None:
             colors = _DEFAULT_COLORS[:len(data_per_metric)]
 
-        for ax, data, ylabel, color in zip(axes, data_per_metric, y_labels, colors):
+        for ax, data, ylabel, color, title in zip(axes, data_per_metric, y_labels, colors, titles):
             mean = data.mean(axis=1)
             std = data.std(axis=1)
             ax.plot(x, mean, marker='o', ms=5, color=color, linewidth=2, label=label)
             ax.fill_between(x, mean - std, mean + std, alpha=0.25, color=color)
             ax.set_xlabel(x_label)
             ax.set_ylabel(ylabel)
-            ax.set_title(ylabel)
+            ax.set_title(title)
             ax.set_xticks(list(x))
             if label is not None:
                 ax.legend()
@@ -662,7 +669,7 @@ class TimeVisualizer:
 
         bp = ax.boxplot(
             durations_per_method,
-            labels=method_labels,
+            tick_labels=method_labels,
             **_BOX_STYLE,
         )
         for patch, color in zip(bp['boxes'], colors):
