@@ -67,9 +67,15 @@ class SigmaAnnealingCallback(ICPCallback):
             icp:       The running ICP instance; its matcher must be a GaussianMatcher.
         """
         t = min(iteration, self.anneal_steps - 1) / max(self.anneal_steps - 1, 1)
-        icp.matcher.sigma = float(
-            self.sigma_init * (self.sigma_final / self.sigma_init) ** t
-        )
+        if hasattr(icp.matcher, "sigma"):
+            icp.matcher.sigma = float(
+                self.sigma_init * (self.sigma_final / self.sigma_init) ** t
+            )
+        else:
+            raise AttributeError(
+                f"ICP matcher {type(icp.matcher).__name__} has no attribute 'sigma'; "
+                "SigmaAnnealingCallback requires a matcher with a 'sigma' attribute."
+            )
 
 
 @dataclass
@@ -352,13 +358,14 @@ class MultiStartICP:
         t0 = time.perf_counter()
         pbar = tqdm(total=self.n_starts, desc=f"Testing {self.n_starts} starting configurations", disable=not self.verbose)
         if self.n_jobs == 1:
-            # Run in-process rather than via a one-worker ProcessPoolExecutor:
-            # a pool buys no parallelism here and only adds spawn/pickling
-            # overhead, which matters when fit() is called many times (e.g.
-            # once per seed per HPO trial).
+            # Run in-process rather than via a single-worker ProcessPoolExecutor: some
+            # wrapped fit() implementations (e.g. probreg's CPD, which pulls in open3d)
+            # initialize native thread pools at import time, and forking such a process
+            # (ProcessPoolExecutor's default start method on Linux) deadlocks the child
+            # the moment it touches a lock held by a thread that didn't survive the fork.
             for R in rotations:
-                pbar.update(1)
                 result, R_init = self._run_single(self.icp, source, target, R)
+                pbar.update(1)
                 all_results.append(result)
                 all_rotations.append(R_init)
                 if result.converged and result.mean_residuals[-1] < self.residual_threshold:

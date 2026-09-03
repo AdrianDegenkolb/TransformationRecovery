@@ -121,8 +121,18 @@ def convergence_ratio(icp_results: list[ICPResult | MultiStartICPResult]) -> flo
     return sum(r.converged for r in icp_results) / len(icp_results)
 
 
-def convergence_to_global_opt_ratio(icp_results: list[ICPResult | MultiStartICPResult], tol: float = 1e-3) -> float:
+def convergence_to_global_opt_ratio(mean_true_residuals: list[float], tol: float = 1e-3) -> float:
     """
-    Returns the fraction of runs that have converged to the globally optimal solution. This is measured by small residual errors.
+    Returns the fraction of runs that have converged to the globally optimal solution.
+
+    Measured via each run's mean *true* residual (ground-truth point correspondence,
+    e.g. MultiSeedSyntheticICPResult.mean_true_residuals) rather than the matcher's own
+    internal residual (ICPResult.mean_residuals): a wrong-but-locally-self-consistent
+    match (e.g. a symmetric cluster swap) can have a small matcher residual while being
+    far from the actual ground truth, which would falsely count as "converged".
+
+    Args:
+        mean_true_residuals: One mean true-residual value per run.
+        tol:                 Threshold below which a run counts as globally optimal.
     """
-    return sum(r.mean_residuals[-1] < tol for r in icp_results) / len(icp_results)
+    return sum(r < tol for r in mean_true_residuals) / len(mean_true_residuals)

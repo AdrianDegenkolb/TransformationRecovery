@@ -122,6 +122,13 @@ class MultiSeedSyntheticICPResult:
         """
         return [res.duration_s for res in self.results]
 
+    @property
+    def deltas(self) -> list[list[float]]:
+        """
+        A list of deltas, one per seed
+        """
+        return [res.deltas for res in self.results]
+
 
 @contextmanager
 def _quiet(icp: ICP | MultiStartICP) -> Generator[None, None, None]:

@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+import icp as icp_module
 from algebra_utils import sample_dispersed_rotations, sample_uniform_rotations
 from icp import ICP, MultiStartICP, SigmaAnnealingCallback, _windowed_delta
 from point_cloud import PointCloud
@@ -127,4 +128,23 @@ def test_icp_record_history_false_skips_cloud_and_matching_history():
     assert result.matching_history == []
     # cheap per-iteration info is still recorded regardless
     assert len(result.mean_residuals) == result.n_iterations
+
+
+def test_multistart_icp_n_jobs_1_runs_without_process_pool(monkeypatch):
+    """n_jobs=1 must not fork a ProcessPoolExecutor: some wrapped .fit()
+    implementations (e.g. probreg's CPD, which pulls in open3d) initialize native
+    thread pools at import time, and forking such a process afterwards deadlocks
+    the child on its first native call. Matches the n_jobs=1-is-sequential
+    convention already used by experiment_runner.fit_multi_seed.
+    """
+    source, target = _small_clouds()
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("ProcessPoolExecutor should not be used when n_jobs=1")
+
+    monkeypatch.setattr(icp_module, "ProcessPoolExecutor", _boom)
+
+    multi = MultiStartICP(ICP(max_iter=5), n_starts=3, n_jobs=1, verbose=False)
+    result = multi.fit(source, target)
+    assert len(result.all_results) == 3
     assert len(result.transform_history) == result.n_iterations
