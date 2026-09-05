@@ -2,6 +2,8 @@
 
 Recovering the rigid (and elastic) transformation between two unordered, noisy point clouds that both originate from a shared but unknown source cloud.
 
+<video src="https://github.com/user-attachments/assets/85f458bf-f2f5-4f45-9736-40ab21ace136" controls></video>
+
 ## Problem setting
 
 Given a source point cloud `S`, two transformations `T1` and `T2` (each with additive noise) produce two observed clouds:

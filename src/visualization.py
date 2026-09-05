@@ -9,11 +9,15 @@ Provides four static-method classes:
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
+
+if TYPE_CHECKING:
+    from matplotlib.animation import FuncAnimation
 
 from algebra_utils import rotation_angle
 from error_metrics import true_residuals as compute_true_residuals
@@ -237,6 +241,79 @@ class PointCloudVisualizer:
         ax.set_zlabel('z')
         ax.set_title(f'Trimmer: {kept.sum()} / {len(cloud)} kept')
         ax.legend(fontsize=7)
+
+    @staticmethod
+    def animate_alignment(
+        cloud_history: list[PointCloud],
+        target: PointCloud,
+        final_cloud: PointCloud,
+        source_color: str = 'tab:blue',
+        target_color: str = 'tab:red',
+        point_size: int = 8,
+        alpha: float = 0.5,
+        interval_ms: int = 80,
+        elev: float = 20.0,
+        azim: float = 45.0,
+    ) -> "FuncAnimation":
+        """Animate a moving source cloud converging onto a fixed target in 3D.
+
+        The target is drawn once and stays fixed; the source cloud is redrawn
+        each frame from `cloud_history`, with `final_cloud` appended as one
+        last frame so the animation ends at the converged state.
+
+        Args:
+            cloud_history: Source cloud state at the start of each ICP iteration
+                           (as recorded in `ICPResult.cloud_history`, i.e. the ICP
+                           instance must have been created with record_history=True).
+            target:        Fixed target point cloud, plotted unchanged throughout.
+            final_cloud:   Source cloud after the final transformation.
+            source_color:  Colour of the moving source cloud.
+            target_color:  Colour of the fixed target cloud.
+            point_size:    Scatter marker size.
+            alpha:         Scatter transparency.
+            interval_ms:   Delay between frames in milliseconds.
+            elev:          3D view elevation angle.
+            azim:          3D view azimuth angle.
+
+        Returns:
+            A matplotlib FuncAnimation. Display inline with
+            `HTML(anim.to_jshtml())` or persist with
+            `anim.save(path, writer="ffmpeg", fps=...)`.
+        """
+        import matplotlib.pyplot as plt
+        from matplotlib.animation import FuncAnimation
+
+        frames = [*cloud_history, final_cloud]
+        all_points = np.concatenate([target.points] + [f.points for f in frames], axis=0)
+        mins, maxs = all_points.min(axis=0), all_points.max(axis=0)
+
+        fig = plt.figure(figsize=(7, 7))
+        ax = fig.add_subplot(projection='3d')
+        ax.view_init(elev=elev, azim=azim)
+
+        tgt = target.points
+        ax.scatter(tgt[:, 0], tgt[:, 1], tgt[:, 2], s=point_size, alpha=alpha, color=target_color, label='Q (target)')
+        source_scatter = ax.scatter([], [], [], s=point_size, alpha=alpha, color=source_color, label='P (source)')
+
+        ax.set_xlim(mins[0], maxs[0])
+        ax.set_ylim(mins[1], maxs[1])
+        ax.set_zlim(mins[2], maxs[2])
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.set_zlabel('z')
+        ax.legend(loc='upper left', fontsize=8)
+        title = ax.set_title('Iteration 0')
+
+        def update(i: int):
+            pts = frames[i].points
+            source_scatter._offsets3d = (pts[:, 0], pts[:, 1], pts[:, 2])
+            is_final = i == len(frames) - 1
+            title.set_text('Final (converged)' if is_final else f'Iteration {i + 1}/{len(cloud_history)}')
+            return source_scatter, title
+
+        anim = FuncAnimation(fig, update, frames=len(frames), interval=interval_ms, blit=False)
+        plt.close(fig)
+        return anim
 
 
 class ErrorMetricsVisualizer:
