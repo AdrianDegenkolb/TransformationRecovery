@@ -50,8 +50,10 @@ src/
   synthetic.py                Synthetic experiment generation (source cloud + ground-truth transforms)
   algebra_utils.py           Rotation utilities (SO(3) sampling, 6D rotation representation)
   hpo.py                      Optuna-based hyperparameter search
+  experiment_runner.py        Multi-seed experiment orchestration and result aggregation
+  error_metrics.py            Convergence/accuracy metrics over ICP results
   visualization.py            Plotting utilities for clouds, convergence, residuals, HPO results
-  utils.py                     Convergence/accuracy metrics over ICP results
+  probreg_baselines.py        Adapters for probreg baselines (CPD, FilterReg) — requires Python 3.12
 
 notebooks/    Numbered experiments demonstrating each component (rigid vs. elastic,
               matching strategies, cloud styles, clustering, trimming, feature extractors,

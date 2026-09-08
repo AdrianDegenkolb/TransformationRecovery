@@ -1,3 +1,10 @@
 - [x] Gaussian Matching ICP does converge yet does not stop processing until all iterations are completed:
     - Tolerance needs to be higher for gaussian matcher
-- [ ] Feature extractor produces features that are invariant to transformations? If yes we dont need to recompute them each step.
+- [x] Feature extractor produces features that are invariant to transformations? If yes we dont need to recompute them each step.
+- [ ] Cache feature matrices
+- [ ] Fit language and nomenclature to literature
+- [ ] Benchmark Speed and Memory
+- [ ] Move to GPU
+- [x] Update Readme to reflect actual module names
+- [ ] Add scaling to transformations (currently we have rotation and translation)
+- [x] See feature invariance under rotation and translation
