@@ -37,19 +37,40 @@ class FeatureExtractor(ABC):
     """Base class for per-point geometric feature extractors.
 
     Implementations must return one feature vector per point.
-    Feature vectors should be invariant to the transformation being recovered
-    (e.g. rotation, translation, and potentially scale).
+
+    Subclasses must set the class variable ``is_transformation_invariant``:
+
+    - ``True``: ``get_features()`` returns bit-identical results for any rigid
+      transform (rotation, translation, uniform scale) applied to the input cloud.
+      Instead of recomputing features repeatedly, feateures can be computed once and
+      then be cached.  Non-invariant extractors will produce stale features after the first iteration.
+
+    - ``False``: features depend on the absolute positions of the points. Whenever the PointCloud is
+      transformed, features must be recomputed.
+
+    Known caveat: k-NN tie-breaking on regular grid clouds (``lattice``,
+    ``2d-lattice``) causes small numerical non-invariance (~1e-2 MAE) even for
+    extractors that declare ``is_transformation_invariant = True``, because
+    near-equal inter-point distances can swap neighbour rank order after a rotation.
+    Benchmark measurements show no observable impact on matching quality, so caching
+    remains safe in practice for these styles.
     """
+
+    is_transformation_invariant: bool
 
     @abstractmethod
     def get_features(self, p: PointCloud) -> NDArray[np.float64]:
         """Compute a feature vector for each point in the cloud.
 
+        Implementations with ``is_transformation_invariant = True`` must return
+        the same array (up to floating-point precision) regardless of any rigid
+        transform applied to ``p`` before calling this method.
+
         Args:
             p: Input point cloud with N points.
 
         Returns:
-            Float64 array of shape (N, D) where D is the feature dimension (can be selected arbitrarily).
+            Float64 array of shape (N, D) where D is the feature dimension.
         """
         ...
 
@@ -69,10 +90,12 @@ class GeometricFeatureExtractor(FeatureExtractor):
     - mean pairwise angle  — mean of angles between neighbor direction vectors
     - std pairwise angle   — std of angles between neighbor direction vectors
 
-    All features are invariant under similarity transformations (rotation, translation,
-    uniform scale). Features are computed once per cloud and can be cached across ICP
-    iterations.
+    All features are ratios or angles derived from local k-NN geometry and are
+    invariant under similarity transformations (rotation, translation, uniform scale).
+    ``Matcher.prepare()`` caches these features once before the ICP loop.
     """
+
+    is_transformation_invariant: bool = True
 
     def __init__(self, k: int = 20) -> None:
         """
@@ -185,9 +208,11 @@ class RobustGeometricFeatureExtractor(FeatureExtractor):
     where scale is the median, over all points in the cloud, of each point's
     mean neighbor distance. All features are invariant under similarity
     transformations (rotation, translation, uniform scale) applied to the
-    whole cloud. Features are computed once per cloud and can be cached
-    across ICP iterations.
+    whole cloud. ``Matcher.prepare()`` caches these features once before the
+    ICP loop.
     """
+
+    is_transformation_invariant: bool = True
 
     def __init__(self, k: int = 20, quantiles: tuple[float, ...] = (0.25, 0.5, 0.75)) -> None:
         """
@@ -276,12 +301,20 @@ class IdentityFeatureExtractor(FeatureExtractor):
     signal, useful for validating the feature integration before any real
     features are implemented.
 
+    ``is_transformation_invariant`` is ``False``: although ``get_features()``
+    always returns ``eye(N)`` regardless of point positions, the oracle
+    semantics (point i matches target point i) are only valid for the
+    initial unrotated source.  Setting this to ``False`` prevents
+    ``Matcher.prepare()`` from caching source features across iterations.
+
     Warning:
         Only meaningful when source and target have the same N and the
         correspondence is i↔i (true for all synthetic experiments).
         Not suitable for large clouds: feature dimension D=N causes
         high memory usage and slow cosine similarity computation.
     """
+
+    is_transformation_invariant: bool = False
 
     def get_features(self, p: PointCloud) -> NDArray[np.float64]:
         """Return the N×N identity matrix as feature matrix.

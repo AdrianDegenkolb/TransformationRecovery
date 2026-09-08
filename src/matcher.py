@@ -11,6 +11,28 @@ from point_cloud import PointCloud
 from feature_extractor import FeatureExtractor, zscored_features
 
 
+def _joint_zscore(
+    feat_src: NDArray[np.float64],
+    feat_tgt: NDArray[np.float64],
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Z-score two feature matrices jointly using their pooled mean and std.
+
+    Mirrors the normalisation performed by ``zscored_features`` so that cached
+    raw features can be re-scored on demand without calling the extractor again.
+
+    Args:
+        feat_src: Raw source feature matrix of shape (N, D).
+        feat_tgt: Raw target feature matrix of shape (M, D).
+
+    Returns:
+        Tuple ``(feat_src_z, feat_tgt_z)`` normalised with the pooled statistics.
+    """
+    all_raw = np.concatenate([feat_src, feat_tgt], axis=0)
+    mean = all_raw.mean(axis=0)
+    std  = all_raw.std(axis=0) + 1e-8
+    return (feat_src - mean) / std, (feat_tgt - mean) / std
+
+
 def _joint_knn(
     source_points: NDArray[np.float64],
     target_points: NDArray[np.float64],
@@ -73,6 +95,27 @@ class Matching:
 class Matcher(ABC):
     """Abstract base class for point cloud correspondence algorithms (E-step)."""
 
+    def prepare(self, source: PointCloud, target: PointCloud) -> None:
+        """Pre-compute and cache feature vectors before the ICP loop.
+
+        Called once by ``ICP.fit()`` with the initial source cloud and the fixed
+        target cloud before the iteration loop begins.  Subclasses that use a
+        ``FeatureExtractor`` should override this method to:
+
+        - Always cache target features (target never changes during ICP).
+        - Cache source features only when
+          ``feature_extractor.is_transformation_invariant`` is ``True``; otherwise
+          source features must be recomputed from the current (transformed) cloud on
+          every ``match()`` call.
+
+        The default implementation is a no-op, which preserves the previous
+        behaviour of computing features live on every ``match()`` call.
+
+        Args:
+            source: Initial source PointCloud (N, 3) before any ICP iteration.
+            target: Fixed target PointCloud (M, 3).
+        """
+
     @abstractmethod
     def match(self, source: PointCloud, target: PointCloud) -> Matching:
         """Compute a correspondence from source to target.
@@ -113,9 +156,38 @@ class NearestNeighborMatcher(Matcher):
         """
         self.feature_extractor = feature_extractor
         self.beta = beta
+        self._feat_src_z: NDArray[np.float64] | None = None
+        self._feat_tgt_z: NDArray[np.float64] | None = None
+        self._feat_tgt_raw: NDArray[np.float64] | None = None
+        self._prepared: bool = False
+
+    def prepare(self, source: PointCloud, target: PointCloud) -> None:
+        """Cache feature vectors for source and/or target before the ICP loop.
+
+        Always caches target features. Caches source features only when the
+        extractor declares ``is_transformation_invariant = True``, in which case
+        ``match()`` skips ``get_features()`` entirely on every subsequent call.
+        When only target is cached, ``match()`` still recomputes source features
+        each iteration but avoids the target extraction cost.
+
+        Args:
+            source: Initial source PointCloud (N, 3).
+            target: Fixed target PointCloud (M, 3).
+        """
+        if self.feature_extractor is None:
+            return
+        feat_tgt_raw = self.feature_extractor.get_features(target)
+        if self.feature_extractor.is_transformation_invariant:
+            feat_src_raw = self.feature_extractor.get_features(source)
+            self._feat_src_z, self._feat_tgt_z = _joint_zscore(feat_src_raw, feat_tgt_raw)
+            self._prepared = True
+        else:
+            self._feat_tgt_raw = feat_tgt_raw
 
     def match(self, source: PointCloud, target: PointCloud) -> Matching:
         """Assign each source point to its nearest neighbor in target.
+
+        Uses cached feature vectors from ``prepare()`` when available.
 
         Args:
             source: PointCloud (N, 3).
@@ -125,7 +197,13 @@ class NearestNeighborMatcher(Matcher):
             Matching that assigns a target_point to each source point with uniform weights.
         """
         if self.feature_extractor is not None:
-            feat_src_z, feat_tgt_z = zscored_features(self.feature_extractor, [source, target])
+            if self._prepared:
+                feat_src_z, feat_tgt_z = self._feat_src_z, self._feat_tgt_z
+            elif self._feat_tgt_raw is not None:
+                feat_src_raw = self.feature_extractor.get_features(source)
+                feat_src_z, feat_tgt_z = _joint_zscore(feat_src_raw, self._feat_tgt_raw)
+            else:
+                feat_src_z, feat_tgt_z = zscored_features(self.feature_extractor, [source, target])
             _, nbr_idx = _joint_knn(
                 source.points, target.points, feat_src_z, feat_tgt_z, self.beta, k=1,
             )
@@ -190,9 +268,38 @@ class GaussianMatcher(Matcher):
         self.feature_mode = feature_mode
         self.alpha = alpha
         self.beta = beta
+        self._feat_src_z: NDArray[np.float64] | None = None
+        self._feat_tgt_z: NDArray[np.float64] | None = None
+        self._feat_tgt_raw: NDArray[np.float64] | None = None
+        self._prepared: bool = False
+
+    def prepare(self, source: PointCloud, target: PointCloud) -> None:
+        """Cache feature vectors for source and/or target before the ICP loop.
+
+        Always caches target features. Caches source features only when the
+        extractor declares ``is_transformation_invariant = True``, in which case
+        ``match()`` skips ``get_features()`` entirely on every subsequent call.
+        When only target is cached, ``match()`` still recomputes source features
+        each iteration but avoids the target extraction cost.
+
+        Args:
+            source: Initial source PointCloud (N, 3).
+            target: Fixed target PointCloud (M, 3).
+        """
+        if self.feature_extractor is None:
+            return
+        feat_tgt_raw = self.feature_extractor.get_features(target)
+        if self.feature_extractor.is_transformation_invariant:
+            feat_src_raw = self.feature_extractor.get_features(source)
+            self._feat_src_z, self._feat_tgt_z = _joint_zscore(feat_src_raw, feat_tgt_raw)
+            self._prepared = True
+        else:
+            self._feat_tgt_raw = feat_tgt_raw
 
     def match(self, source: PointCloud, target: PointCloud) -> Matching:
         """Soft Gaussian correspondence from source to target.
+
+        Uses cached feature vectors from ``prepare()`` when available.
 
         Args:
             source: PointCloud (N, 3).
@@ -207,7 +314,13 @@ class GaussianMatcher(Matcher):
         # --- Candidate selection ---
         feat_src_z = feat_tgt_z = None
         if self.feature_extractor is not None:
-            feat_src_z, feat_tgt_z = zscored_features(self.feature_extractor, [source, target])
+            if self._prepared:
+                feat_src_z, feat_tgt_z = self._feat_src_z, self._feat_tgt_z
+            elif self._feat_tgt_raw is not None:
+                feat_src_raw = self.feature_extractor.get_features(source)
+                feat_src_z, feat_tgt_z = _joint_zscore(feat_src_raw, self._feat_tgt_raw)
+            else:
+                feat_src_z, feat_tgt_z = zscored_features(self.feature_extractor, [source, target])
 
         n = len(source.points)
         if feat_src_z is not None and feat_tgt_z is not None and self.feature_mode == 'append':

@@ -2,7 +2,11 @@ import numpy as np
 import pytest
 
 from point_cloud import PointCloud
-from feature_extractor import IdentityFeatureExtractor
+from feature_extractor import (
+    GeometricFeatureExtractor,
+    IdentityFeatureExtractor,
+    RobustGeometricFeatureExtractor,
+)
 from matcher import GaussianMatcher, NearestNeighborMatcher
 
 
@@ -124,3 +128,76 @@ def test_alpha_zero_recovers_standard_gaussian(small_cloud: PointCloud) -> None:
 
     np.testing.assert_allclose(m_plain.target_positions, m_feat.target_positions, atol=1e-10)
     np.testing.assert_allclose(m_plain.weights, m_feat.weights, atol=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# prepare() caching tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("MatcherCls,kwargs", [
+    (NearestNeighborMatcher, {}),
+    (GaussianMatcher, {"sigma": 3.0, "k": 8}),
+])
+class TestPrepare:
+    """Tests for the prepare() caching contract on both matchers."""
+
+    def test_prepare_caches_target_features(
+        self,
+        small_cloud: PointCloud,
+        MatcherCls: type,
+        kwargs: dict,
+    ) -> None:
+        """After prepare(), _feat_tgt_raw (or _feat_tgt_z) must be set."""
+        matcher = MatcherCls(**kwargs, feature_extractor=GeometricFeatureExtractor(k=5))
+        matcher.prepare(small_cloud, small_cloud)
+        # At least one of the target caches must be populated.
+        assert matcher._feat_tgt_raw is not None or matcher._feat_tgt_z is not None
+
+    def test_prepare_caches_source_when_invariant(
+        self,
+        small_cloud: PointCloud,
+        MatcherCls: type,
+        kwargs: dict,
+    ) -> None:
+        """With an invariant extractor, prepare() must set _feat_src_z and _prepared=True."""
+        matcher = MatcherCls(**kwargs, feature_extractor=GeometricFeatureExtractor(k=5))
+        assert not matcher._prepared
+        matcher.prepare(small_cloud, small_cloud)
+        assert matcher._prepared
+        assert matcher._feat_src_z is not None
+
+    def test_prepare_does_not_cache_source_when_not_invariant(
+        self,
+        small_cloud: PointCloud,
+        MatcherCls: type,
+        kwargs: dict,
+    ) -> None:
+        """With a non-invariant extractor, _feat_src_z must remain None after prepare()."""
+        matcher = MatcherCls(**kwargs, feature_extractor=IdentityFeatureExtractor())
+        matcher.prepare(small_cloud, small_cloud)
+        assert not matcher._prepared
+        assert matcher._feat_src_z is None
+
+    def test_match_result_identical_with_and_without_prepare(
+        self,
+        small_cloud: PointCloud,
+        MatcherCls: type,
+        kwargs: dict,
+    ) -> None:
+        """target_positions from match() must be numerically identical with and without prepare()."""
+        target = PointCloud(small_cloud.points + 0.3)
+        extractor = RobustGeometricFeatureExtractor(k=5)
+
+        without = MatcherCls(**kwargs, feature_extractor=extractor)
+        m_without = without.match(small_cloud, target)
+
+        with_prep = MatcherCls(**kwargs, feature_extractor=extractor)
+        with_prep.prepare(small_cloud, target)
+        m_with = with_prep.match(small_cloud, target)
+
+        np.testing.assert_allclose(
+            m_without.target_positions,
+            m_with.target_positions,
+            atol=1e-10,
+            err_msg="prepare() must not change match results for invariant extractor.",
+        )

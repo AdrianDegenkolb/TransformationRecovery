@@ -237,6 +237,10 @@ class ICP:
     def fit(self, source: PointCloud, target: PointCloud) -> ICPResult:
         """Run ICP to find the rigid transformation mapping source onto target.
 
+        Calls ``matcher.prepare(source, target)`` once before the loop.
+        Feature caching is automatic for invariant extractors; non-invariant
+        extractors still benefit from target-side caching.
+
         Args:
             source: Source PointCloud (N, 3).
             target: Target PointCloud (M, 3).
@@ -254,6 +258,7 @@ class ICP:
         transform_history: list[RigidTransformation] = []
         deltas: list[float] = []
 
+        self.matcher.prepare(source, target)
         t0 = time.perf_counter()
         pbar = tqdm(range(self.max_iter), desc="ICP", disable=not self.verbose)
         for i in pbar:
