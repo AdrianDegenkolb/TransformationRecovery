@@ -41,7 +41,7 @@ The two steps alternate until the accumulated transformation changes by less tha
 
 **5. Output** — each of the `N` starts converges to a (possibly local) optimum. The best-residual fit is selected:
 
-$$T^* = \operatorname{argmin}_k \operatorname{residual}(T_k)$$
+$$T^* = \text{argmin}_k \text{residual}(T_k)$$
 
 and applied to the full (untrimmed) cloud `P`.
 
