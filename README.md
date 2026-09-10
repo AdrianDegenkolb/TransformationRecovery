@@ -2,39 +2,48 @@
 
 Recovering the rigid (and elastic) transformation between two unordered, noisy point clouds that both originate from a shared but unknown source cloud.
 
-<video src="https://github.com/user-attachments/assets/85f458bf-f2f5-4f45-9736-40ab21ace136" controls></video>
+<video src="https://github.com/user-attachments/assets/85f458bf-f2f5-4f45-9736-40ab21ace136" controls width="100%"></video>
 
 ## Problem setting
 
-Given a source point cloud `S`, two transformations `T1` and `T2` (each with additive noise) produce two observed clouds:
+Given a source point cloud `S`, two transformations `T1` and `T2` (each with additive noise) produce two (partially) observed clouds:
 
 ```
 P = T1(S)
 Q = T2(S)
 ```
 
-Neither `S` nor `T1`/`T2` are known at recovery time — only `P` and `Q` are observed, and their points are not in correspondence. The goal is to recover the transformation
+Neither `S` nor `T1`/`T2` are known at recovery time — only `P` and `Q` are partially observed, and their points are not in correspondence. The goal is to recover the transformation
 
 ```
 T_gt = T2 ∘ T1⁻¹
 ```
 
-that maps `P` onto `Q`, using variants of Iterative Closest Point (ICP) registration.
+that maps `P` onto `Q`.
 
 ## Approach
 
-The pipeline alternates between two steps until convergence:
+![Registration Pipeline](RegistrationPipeline.dc.svg "Registration Pipeline")
 
-1. **Matching (E-step)** — find correspondences between points in `P` and `Q`, either via hard nearest-neighbor assignment or soft (Gaussian-weighted) assignment, optionally in a joint position+feature space.
-2. **Fitting (M-step)** — fit a transformation (rigid or elastic) that minimizes the residuals given the current correspondences.
+The pipeline has five stages:
 
-On top of vanilla ICP, the project explores several extensions:
+**1. Input** — `P` and `Q` are noisy, partially observed point clouds. They share an unknown source geometry but are seen from different unknown poses, so point positions are noisy and there are no known correspondences.
 
-- **Feature-augmented matching** — per-point geometric features (e.g. neighborhood curvature/shape descriptors) that are invariant to the transformation, used to disambiguate matches beyond spatial proximity, including a dropout-resilient robust variant.
-- **Trimming / clustering** — removing or collapsing geometrically redundant points (e.g. dense clusters represented by their centroid) before registration.
-- **Elastic transformations** — a rigid component plus a smooth per-point residual field, fitted with a data term, magnitude penalty, and graph-Laplacian smoothness term (implemented with PyTorch).
-- **Multi-start ICP** — running ICP from multiple random rotation initializations to avoid local optima.
-- **Hyperparameter optimization** — tuning matcher/ICP/feature-extractor settings with Optuna.
+**2. Geometric trimming** — each cloud is independently trimmed before registration.  To do this, points are mapped to a geometric feature space, that describes the local geometric context. A clustering algorithm groups points that have similar local geometric context (for example groups that are in a lattice, or points that are on the outside of the cloud and share a specific curvature). Large clusters are collapsed to a single representative; only geometrically distinct points survive.
+
+**3. Dispersed initializations** — rather than a single starting pose, `N` initial rotations of `P` are sampled. Rotations are spread apart across SO(3) via farthest-point sampling (rather than i.i.d. random draws), which increases the probability that at least one initialization falls in the basin of the global optimum.
+
+**4. Iterative Closest Point (ICP)** — each initialization runs an independent ICP loop on the trimmed clouds:
+- **E-step (Match)** — every source point is assigned a target point by nearest-neighbor search in the joint space of 3D position and per-point geometric features (appended as additional dimensions). This enables the E-Step to account for both spatial proximity and geometric similarity. For example it allows to match a point $p \in P$ with a geometrically similar but more distant point $q_1 \in Q$ rather than geometrically different but close point $q_2 \in Q$.
+- **M-step (Fit)** — a rigid transformation is fitted to minimize weighted residuals on the current correspondences via Procrustes analysis.
+
+The two steps alternate until the accumulated transformation changes by less than a tolerance `tol`.
+
+**5. Output** — each of the `N` starts converges to a (possibly local) optimum. The best-residual fit is selected:
+
+$$T^* = \operatorname{argmin}_k \operatorname{residual}(T_k)$$
+
+and applied to the full (untrimmed) cloud `P`.
 
 ## Project structure
 
