@@ -551,7 +551,7 @@ class ErrorMetricsVisualizer:
     ) -> tuple[Figure, NDArray[np.float64]]:
         """Histograms of rotation error, translation error, and closest-point residual distributions.
 
-        Creates a 1×3 figure with one overlaid histogram per metric.
+        Creates a 1×4 figure with one overlaid histogram per metric.
 
         Args:
             true_residuals_per_method:           1D true residual array per method.
@@ -566,7 +566,7 @@ class ErrorMetricsVisualizer:
         """
         import matplotlib.pyplot as plt
 
-        fig, axes = plt.subplots(1, 4, figsize=(12, 5))
+        fig, axes = plt.subplots(1, 4, figsize=(20, 5))
         _plot_hist(axes[0], true_residuals_per_method, 'True Residual', 'True Residuals', method_labels, method_colors)
         _plot_hist(axes[1], closest_point_residuals_per_method, 'Closest-point residual', 'Closest-point Residuals', method_labels, method_colors)
         _plot_hist(axes[2], rot_errors_per_method, 'Rotation error (°)', 'Rotation Error', method_labels, method_colors)
