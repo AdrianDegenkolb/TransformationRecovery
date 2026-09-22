@@ -105,7 +105,7 @@ class ClusteringTrimmer(Trimmer):
         self.min_points = min_points
 
     def _large_cluster_labels(self, labels: NDArray[np.int64], n_points: int) -> set[int]:
-        """Return cluster labels that exceed both size thresholds.
+        """Return cluster labels that exceed both (relative and absolute) size thresholds.
 
         Args:
             labels: Per-point cluster assignment array of shape (N,).
