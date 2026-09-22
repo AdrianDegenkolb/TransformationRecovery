@@ -3,6 +3,9 @@ from numpy.typing import NDArray
 
 
 class PointCloud:
+    """
+    A 3D point cloud represented as an (N, 3) array of points.
+    """
     def __init__(self, points: NDArray[np.float64]):
         self.points = np.asarray(points, dtype=np.float64)
         if self.points.ndim != 2 or self.points.shape[1] != 3:
