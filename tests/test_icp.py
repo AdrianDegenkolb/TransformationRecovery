@@ -130,6 +130,23 @@ def test_icp_record_history_false_skips_cloud_and_matching_history():
     assert len(result.mean_residuals) == result.n_iterations
 
 
+def test_init_align_centroids_recovers_pure_translation():
+    """Regression test: init_align_centroids=True used to compose the centroid-
+    alignment translation on top of a first-iteration fit that was itself
+    computed on the un-translated cloud (current was never actually shifted
+    by the centroid-alignment step), double-counting the translation.
+    """
+    rng = np.random.default_rng(0)
+    points = rng.uniform(-10, 10, size=(200, 3))
+    t_true = np.array([15.0, -8.0, 5.0])
+    source = PointCloud(points)
+    target = PointCloud(points + t_true)
+
+    result = ICP(init_align_centroids=True, verbose=False, max_iter=50).fit(source, target)
+
+    assert result.transformation.t == pytest.approx(t_true, abs=1e-6)
+
+
 def test_multistart_icp_n_jobs_1_runs_without_process_pool(monkeypatch):
     """n_jobs=1 must not fork a ProcessPoolExecutor: some wrapped .fit()
     implementations (e.g. probreg's CPD, which pulls in open3d) initialize native
