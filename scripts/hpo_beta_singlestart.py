@@ -58,7 +58,8 @@ N_SEEDS               = 30
 N_HOLDOUT_SEEDS       = 15
 MAX_ITER              = 400
 TOL                   = 0.1
-GEN_KWARGS            = dict(n=500, noise_std=0.1, t_scale=8.0)
+GEN_KWARGS            = dict(n=500, t_scale=8.0)
+NOISE_STD             = 0.1
 RELIABILITY_THRESHOLD = 0.8
 
 TUNING_SEEDS  = list(range(N_SEEDS))
@@ -117,7 +118,7 @@ def run_study(
     study.optimize(
         make_beta_sweep_objective(
             style, TUNING_SEEDS, GEN_KWARGS, MAX_ITER, TOL,
-            dropout_prob=dropout_prob, n_jobs=n_jobs,
+            dropout_prob=dropout_prob, noise_std=NOISE_STD, n_jobs=n_jobs,
         ),
         n_trials=n_trials,
         show_progress_bar=True,
@@ -174,7 +175,7 @@ def validate_on_holdout(
     factory = build_single_start_nn_icp_factory(FixedTrial(trial.params), MAX_ITER, TOL)
     return evaluate_icp(
         factory, style, HOLDOUT_SEEDS, GEN_KWARGS, trimmer=None,
-        dropout_prob=dropout_prob, n_jobs=n_jobs,
+        dropout_prob=dropout_prob, noise_std=NOISE_STD, n_jobs=n_jobs,
     )
 
 

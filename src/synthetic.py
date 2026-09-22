@@ -17,9 +17,12 @@ CloudStyle = Literal["random", "clustered", "lattice", "2d-lattice", "muscle-fib
 class SyntheticExperiment:
     """Two rigid transformations of a shared source cloud with ground truth.
 
-    S is transformed twice (with per-point Gaussian noise) to produce
+    S is transformed twice to produce the noiseless ground-truth clouds
     P = T1(S) and Q = T2(S). The ground-truth transformation mapping P to Q
-    is T_gt = T2 ∘ T1⁻¹.
+    is T_gt = T2 ∘ T1⁻¹. Dropout and measurement noise are simulated
+    separately, on demand, via `observe_point_clouds` — P and Q themselves
+    stay exact so they can serve as a noise-free reference for evaluating
+    recovered transformations.
 
     Attributes:
         S:    Source point cloud (N, 3).
@@ -51,7 +54,6 @@ class SyntheticExperiment:
     @staticmethod
     def generate(
         n: int = 2000,
-        noise_std: float = 3.0,
         t_scale: float = 8.0,
         seed: int | None = 42,
         style: CloudStyle = "random",
@@ -62,7 +64,6 @@ class SyntheticExperiment:
         Args:
             n:          Target number of points in the source cloud.
                         For 'lattice' the actual count may differ slightly due to integer grid dims.
-            noise_std:  Per-point Gaussian noise added when applying each transformation.
             t_scale:    Scale of the random translation component.
             seed:       Random seed for reproducibility. Pass None for a random run.
             style:      Shape of the source cloud — 'random', 'clustered', 'lattice', '2d-lattice',
@@ -72,31 +73,45 @@ class SyntheticExperiment:
 
         Returns:
             SyntheticExperiment with S, T1, T2, P, Q, and T_gt = T2 ∘ T1⁻¹.
+            P and Q are exact (noiseless); use `observe_point_clouds` to simulate
+            dropout and measurement noise.
         """
         if seed is not None:
             np.random.seed(seed)
 
         S = PointCloud(_make_cloud(n, style, jitter_std))
-        T1 = RigidTransformation.random(noise_std=noise_std, t_scale=t_scale)
-        T2 = RigidTransformation.random(noise_std=noise_std, t_scale=t_scale)
+        T1 = RigidTransformation.random(t_scale=t_scale)
+        T2 = RigidTransformation.random(t_scale=t_scale)
         P = T1.apply(S)
         Q = T2.apply(S)
         T_gt = T2.compose(T1.inverse())
 
         return SyntheticExperiment(S=S, T1=T1, T2=T2, P=P, Q=Q, T_gt=T_gt)
 
-    def observe_point_clouds(self, dropout_prob: float) -> tuple[PointCloud, PointCloud]:
+    def observe_point_clouds(self, dropout_prob: float, noise_std: float = 0.0) -> tuple[PointCloud, PointCloud]:
         """
-        Returns the point clouds P and Q but omits individual points with probability dropout probability.
+        Simulates observing P and Q: omits individual points with probability
+        dropout_prob, then perturbs the surviving points with independent
+        per-point Gaussian noise. P and Q are perturbed independently, so
+        even the ground-truth transformation cannot map one exactly onto the
+        other after this — that's the point, it mimics two independent noisy
+        measurements of the same underlying geometry.
 
         Args:
-            dropout_prob: The probability to miss individual points in the observation
+            dropout_prob: The probability to miss individual points in the observation.
+            noise_std:    Std of the per-point Gaussian noise added to surviving points.
+
         Returns:
             tuple containing observed and incomplete point clouds P and Q
         """
         indices_for_P = np.random.choice([True, False], size=len(self.P), replace=True, p=[1 - dropout_prob, dropout_prob])
         indices_for_Q = np.random.choice([True, False], size=len(self.Q), replace=True, p=[1 - dropout_prob, dropout_prob])
-        return PointCloud(self.P.points[indices_for_P]), PointCloud(self.Q.points[indices_for_Q])
+        p_points = self.P.points[indices_for_P]
+        q_points = self.Q.points[indices_for_Q]
+        if noise_std > 0:
+            p_points = p_points + np.random.randn(*p_points.shape) * noise_std
+            q_points = q_points + np.random.randn(*q_points.shape) * noise_std
+        return PointCloud(p_points), PointCloud(q_points)
 
 
 def _make_cloud(n: int, style: CloudStyle, jitter_std: float = 0.0) -> NDArray[np.float64]:

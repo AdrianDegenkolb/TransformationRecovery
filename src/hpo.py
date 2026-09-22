@@ -277,6 +277,7 @@ def evaluate_icp(
     gen_kwargs: dict[str, Any],
     trimmer: Trimmer | None = None,
     dropout_prob: float = 0.0,
+    noise_std: float = 0.0,
     n_jobs: int = 1,
 ) -> dict[str, float]:
     """Evaluate an ICP configuration over multiple random seeds.
@@ -293,10 +294,12 @@ def evaluate_icp(
         seeds:        Random seeds to average over. Passed explicitly (rather than
                       just a count) so callers can use disjoint seed sets for tuning
                       vs. held-out evaluation.
-        gen_kwargs:   Kwargs for SyntheticExperiment.generate (n, noise_std, t_scale, ...).
+        gen_kwargs:   Kwargs for SyntheticExperiment.generate (n, t_scale, ...).
                       Must not contain 'style' or 'seed'.
         trimmer:      Optional trimmer applied to (P, Q) before each ICP call.
         dropout_prob: Probability of dropping individual points from the observation.
+        noise_std:    Std of per-point Gaussian noise added to the observation
+                      (see SyntheticExperiment.observe_point_clouds).
         n_jobs:       Worker processes for parallelizing across seeds. Keep the
                       icp_factory's own MultiStartICP (if any) at n_jobs=1 when
                       using this, since nesting pools oversubscribes CPU cores.
@@ -313,7 +316,7 @@ def evaluate_icp(
     """
     icp = icp_factory()
     result = fit_multi_seed(
-        icp, seeds=seeds, dropout_prob=dropout_prob, verbose=False,
+        icp, seeds=seeds, dropout_prob=dropout_prob, noise_std=noise_std, verbose=False,
         trimmer=trimmer, experiment_kwargs={**gen_kwargs, "style": style},
         n_jobs=n_jobs,
     )
@@ -357,6 +360,7 @@ def make_objective(
     max_iter: int,
     tol: float,
     dropout_prob: float = 0.0,
+    noise_std: float = 0.0,
     multistart_n_jobs: int = 1,
     n_jobs: int = 1,
 ) -> Callable[[optuna.Trial], float]:
@@ -374,12 +378,15 @@ def make_objective(
     Args:
         style:              Cloud geometry for SyntheticExperiment.generate.
         seeds:              Random seeds to average each trial over.
-        gen_kwargs:         Kwargs for SyntheticExperiment.generate (n, noise_std, t_scale, ...).
+        gen_kwargs:         Kwargs for SyntheticExperiment.generate (n, t_scale, ...).
         max_iter:           Fixed ICP max_iter.
         tol:                Fixed ICP tol.
         dropout_prob:       Probability of dropping individual points from the observation,
                             applied identically across all trials so the search optimizes
                             for this noise regime rather than only the clean case.
+        noise_std:          Std of per-point Gaussian noise added to the observation
+                            (see SyntheticExperiment.observe_point_clouds), applied
+                            identically across all trials.
         multistart_n_jobs:  Worker processes for MultiStartICP trials. See build_icp_factory.
                             Keep at 1 when n_jobs != 1, since nesting pools
                             oversubscribes CPU cores.
@@ -392,7 +399,10 @@ def make_objective(
     def objective(trial: optuna.Trial) -> float:
         factory = build_icp_factory(trial, max_iter, tol, multistart_n_jobs=multistart_n_jobs)
         trimmer = build_trimmer(trial, n=gen_kwargs.get("n", 2000))
-        metrics = evaluate_icp(factory, style, seeds, gen_kwargs, trimmer=trimmer, dropout_prob=dropout_prob, n_jobs=n_jobs)
+        metrics = evaluate_icp(
+            factory, style, seeds, gen_kwargs, trimmer=trimmer,
+            dropout_prob=dropout_prob, noise_std=noise_std, n_jobs=n_jobs,
+        )
         return _record_trial_metrics(trial, metrics)
 
     return objective
@@ -405,6 +415,7 @@ def make_beta_sweep_objective(
     max_iter: int,
     tol: float,
     dropout_prob: float = 0.0,
+    noise_std: float = 0.0,
     n_jobs: int = 1,
 ) -> Callable[[optuna.Trial], float]:
     """Create an Optuna objective over the reduced single-start `beta` search space.
@@ -422,7 +433,7 @@ def make_beta_sweep_objective(
     Args:
         style:        Cloud geometry for SyntheticExperiment.generate.
         seeds:        Random seeds to average each trial over.
-        gen_kwargs:   Kwargs for SyntheticExperiment.generate (n, noise_std, t_scale, ...).
+        gen_kwargs:   Kwargs for SyntheticExperiment.generate (n, t_scale, ...).
         max_iter:     Fixed ICP max_iter.
         tol:          Fixed ICP tol.
         dropout_prob: Probability of dropping individual points from the observation.
@@ -430,6 +441,8 @@ def make_beta_sweep_objective(
                       its features, so it directly affects how much a high `beta`
                       can be trusted — run separate studies per value rather than
                       letting it vary within one.
+        noise_std:    Std of per-point Gaussian noise added to the observation
+                      (see SyntheticExperiment.observe_point_clouds).
         n_jobs:       Worker processes for parallelizing evaluate_icp across seeds.
 
     Returns:
@@ -439,7 +452,7 @@ def make_beta_sweep_objective(
         factory = build_single_start_nn_icp_factory(trial, max_iter, tol)
         metrics = evaluate_icp(
             factory, style, seeds, gen_kwargs, trimmer=None,
-            dropout_prob=dropout_prob, n_jobs=n_jobs,
+            dropout_prob=dropout_prob, noise_std=noise_std, n_jobs=n_jobs,
         )
         return _record_trial_metrics(trial, metrics)
 

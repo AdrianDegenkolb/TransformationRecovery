@@ -20,7 +20,7 @@ def _clustered_cloud_with_offset(offset: np.ndarray) -> tuple[PointCloud, PointC
     adapter's correctness from that known local-optimum sensitivity, which the
     comparison notebook explores separately via MultiStartICP vs. single-run runs.
     """
-    exp = SyntheticExperiment.generate(n=200, noise_std=0.01, t_scale=0, style="clustered", seed=0)
+    exp = SyntheticExperiment.generate(n=200, t_scale=0, style="clustered", seed=0)
     source = exp.S
     target = PointCloud(source.points + offset)
     return source, target
@@ -48,8 +48,9 @@ def test_probreg_method_records_matching_length_history(method_cls):
     # n=200: GMMTree's lstsq-based M-step hits an edge case with very small point
     # counts (empty residuals array from an underdetermined per-node system),
     # a probreg-internal limitation unrelated to this adapter.
-    exp = SyntheticExperiment.generate(n=200, noise_std=0.01, t_scale=8, style="clustered", seed=1)
-    result = method_cls(maxiter=100).fit(exp.P, exp.Q)
+    exp = SyntheticExperiment.generate(n=200, t_scale=8, style="clustered", seed=1)
+    p, q = exp.observe_point_clouds(dropout_prob=0.0, noise_std=0.01)
+    result = method_cls(maxiter=100).fit(p, q)
 
     assert len(result.transform_history) == result.n_iterations
     assert len(result.mean_residuals) == result.n_iterations

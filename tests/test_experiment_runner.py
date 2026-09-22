@@ -78,7 +78,7 @@ def test_quiet_also_silences_wrapped_icp_for_multistart():
 
 def test_fit_multi_seed_runs_and_restores_verbose():
     icp = ICP(max_iter=3, verbose=True)
-    result = fit_multi_seed(icp, seeds=[0, 1], verbose=False, experiment_kwargs={'n': 15, 'noise_std': 0.0})
+    result = fit_multi_seed(icp, seeds=[0, 1], verbose=False, experiment_kwargs={'n': 15})
     assert set(result.r.keys()) == {0, 1}
     assert icp.verbose is True
 

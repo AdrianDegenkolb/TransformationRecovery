@@ -60,3 +60,37 @@ def test_muscle_fiber_jitter_increases_spread_around_fiber_radius() -> None:
         return float(radii.std())
 
     assert xy_radius_std(high_jitter) > xy_radius_std(low_jitter)
+
+
+def test_generate_produces_noiseless_ground_truth_clouds() -> None:
+    """P and Q must exactly satisfy T1(S) = P and T2(S) = Q with no noise, so
+    they can serve as a noise-free reference (see MultiSeedSyntheticICPResult.true_residuals).
+    """
+    exp = SyntheticExperiment.generate(n=50, seed=0)
+    np.testing.assert_allclose(exp.P.points, exp.T1.apply(exp.S).points)
+    np.testing.assert_allclose(exp.Q.points, exp.T2.apply(exp.S).points)
+
+
+def test_observe_point_clouds_no_noise_is_a_subset() -> None:
+    """noise_std=0.0 (the default) must leave surviving points untouched."""
+    exp = SyntheticExperiment.generate(n=100, seed=0)
+    np.random.seed(0)
+    p_obs, q_obs = exp.observe_point_clouds(dropout_prob=0.3)
+
+    assert all(tuple(pt) in {tuple(x) for x in exp.P.points} for pt in p_obs.points)
+    assert all(tuple(pt) in {tuple(x) for x in exp.Q.points} for pt in q_obs.points)
+
+
+def test_observe_point_clouds_noise_perturbs_points_independently() -> None:
+    """noise_std > 0 must perturb P and Q, and exp.P/exp.Q themselves stay untouched."""
+    exp = SyntheticExperiment.generate(n=100, seed=0)
+    clean_P, clean_Q = exp.P.points.copy(), exp.Q.points.copy()
+
+    np.random.seed(0)
+    p_obs, q_obs = exp.observe_point_clouds(dropout_prob=0.0, noise_std=1.0)
+
+    assert not np.allclose(p_obs.points, exp.P.points)
+    assert not np.allclose(q_obs.points, exp.Q.points)
+    np.testing.assert_array_equal(exp.P.points, clean_P)
+    np.testing.assert_array_equal(exp.Q.points, clean_Q)
+

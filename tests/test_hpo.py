@@ -3,7 +3,14 @@ import optuna
 import pytest
 
 from feature_extractor import GeometricFeatureExtractor, RobustGeometricFeatureExtractor
-from hpo import build_icp_factory, build_trimmer, evaluate_icp, make_objective
+from hpo import (
+    build_icp_factory,
+    build_single_start_nn_icp_factory,
+    build_trimmer,
+    evaluate_icp,
+    make_beta_sweep_objective,
+    make_objective,
+)
 from icp import ICP, MultiStartICP, SigmaAnnealingCallback
 from matcher import GaussianMatcher, NearestNeighborMatcher
 from trimmer import ClusteringTrimmer
@@ -108,7 +115,7 @@ def test_evaluate_icp_returns_all_metrics():
         "matching": "hard", "feature_extractor": "none", "use_multistart": False,
     })
     factory = build_icp_factory(trial, max_iter=20, tol=1e-6)
-    metrics = evaluate_icp(factory, style="clustered", seeds=[0, 1], gen_kwargs=dict(n=100, noise_std=0.0))
+    metrics = evaluate_icp(factory, style="clustered", seeds=[0, 1], gen_kwargs=dict(n=100))
 
     assert set(metrics.keys()) == {
         "mean_true_residual", "mean_rot_err", "mean_t_err", "mean_duration_s", "reliability",
@@ -117,13 +124,63 @@ def test_evaluate_icp_returns_all_metrics():
     assert 0.0 <= metrics["reliability"] <= 1.0
 
 
+def test_single_start_factory_builds_plain_icp_with_feature_matcher():
+    trial = _fixed_trial({"feature_extractor": "geometric", "fe_k": 30, "beta": 4.0})
+    icp = build_single_start_nn_icp_factory(trial, max_iter=60, tol=1e-6)()
+
+    assert isinstance(icp, ICP)
+    assert not isinstance(icp, MultiStartICP)
+    assert isinstance(icp.matcher, NearestNeighborMatcher)
+    assert isinstance(icp.matcher.feature_extractor, GeometricFeatureExtractor)
+    assert icp.matcher.feature_extractor.k == 30
+    assert icp.matcher.beta == pytest.approx(4.0)
+    assert icp.callbacks == []
+    assert icp.record_history is False
+
+
+def test_single_start_factory_never_suggests_disabled_parameters():
+    """The reduced space must not offer 'none', multi-start, or soft-matching params.
+
+    A FixedTrial raises ValueError when a parameter it was not given is suggested,
+    so supplying only the three intended parameters asserts the space is exactly those.
+    """
+    trial = _fixed_trial({"feature_extractor": "robust", "fe_k": 10, "beta": 1.0})
+    build_single_start_nn_icp_factory(trial, max_iter=60, tol=1e-6)()
+
+    assert set(trial.params) == {"feature_extractor", "fe_k", "beta"}
+
+
+def test_single_start_factory_returns_fresh_instances():
+    trial = _fixed_trial({"feature_extractor": "geometric", "fe_k": 8, "beta": 2.0})
+    factory = build_single_start_nn_icp_factory(trial, max_iter=60, tol=1e-6)
+
+    first, second = factory(), factory()
+    assert first is not second
+    assert first.matcher is not second.matcher
+    assert first.matcher.beta == second.matcher.beta
+
+
+def test_make_beta_sweep_objective_records_metrics_and_ignores_trimmer_params():
+    trial = _fixed_trial({"feature_extractor": "geometric", "fe_k": 5, "beta": 3.0})
+    objective = make_beta_sweep_objective(
+        style="clustered", seeds=[0, 1], gen_kwargs=dict(n=100),
+        max_iter=20, tol=1e-6,
+    )
+    value = objective(trial)
+
+    assert isinstance(value, float)
+    assert {"mean_rot_err", "mean_t_err", "mean_duration_s", "reliability"} <= trial.user_attrs.keys()
+    # No trimmer parameters were suggested: trimming is fixed off for this study.
+    assert set(trial.params) == {"feature_extractor", "fe_k", "beta"}
+
+
 def test_make_objective_returns_single_true_residual_objective():
     trial = _fixed_trial({
         "matching": "hard", "feature_extractor": "none", "use_multistart": False,
         "use_trimmer": False,
     })
     objective = make_objective(
-        style="clustered", seeds=[0, 1], gen_kwargs=dict(n=100, noise_std=0.0),
+        style="clustered", seeds=[0, 1], gen_kwargs=dict(n=100),
         max_iter=20, tol=1e-6,
     )
     value = objective(trial)
