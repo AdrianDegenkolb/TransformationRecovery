@@ -92,7 +92,10 @@ class ICPResult:
                              Empty if the ICP instance was created with record_history=False.
         matching_history:    Matching from the E-step of each iteration.
                              Empty if the ICP instance was created with record_history=False.
-        transform_history:   Accumulated transformation after each M-step.
+        transform_history:   Accumulated transformation after each M-step. One entry
+                             per iteration, parallel to mean_residuals/deltas; any
+                             init_align_centroids pre-alignment is folded into these
+                             entries rather than recorded as a separate step.
         deltas:              Per step delta. ICP is considered converged if
                              delta = ||last_10_transformation.R - I||_F + ||last_10_transformation.t||_2 < tolerance
     """
@@ -262,7 +265,6 @@ class ICP:
         if self.init_align_centroids:
             accumulated = self._fit_translation_only(current, target)
             current = accumulated.apply(current)
-            transform_history.append(accumulated)
         else:
             accumulated = RigidTransformation.identity()
 

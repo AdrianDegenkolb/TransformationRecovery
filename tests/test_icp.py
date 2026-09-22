@@ -147,6 +147,23 @@ def test_init_align_centroids_recovers_pure_translation():
     assert result.transformation.t == pytest.approx(t_true, abs=1e-6)
 
 
+@pytest.mark.parametrize("init_align_centroids", [True, False])
+def test_transform_history_has_exactly_one_entry_per_iteration(init_align_centroids: bool):
+    """Regression test: the centroid pre-alignment used to be appended to
+    transform_history before the loop, giving n_iterations + 1 entries. That
+    broke the parallel-array contract with mean_residuals/deltas, and shifted
+    ICP's per-iteration trajectory one step against the probreg baselines it is
+    plotted with (see visualization.ICPComparisonVisualizer). The pre-alignment
+    is already folded into every accumulated entry, so it needs no entry of its own.
+    """
+    source, target = _small_clouds()
+    result = ICP(max_iter=5, init_align_centroids=init_align_centroids).fit(source, target)
+
+    assert len(result.transform_history) == result.n_iterations
+    assert len(result.mean_residuals) == result.n_iterations
+    assert len(result.deltas) == result.n_iterations
+
+
 def test_multistart_icp_n_jobs_1_runs_without_process_pool(monkeypatch):
     """n_jobs=1 must not fork a ProcessPoolExecutor: some wrapped .fit()
     implementations (e.g. probreg's CPD, which pulls in open3d) initialize native
