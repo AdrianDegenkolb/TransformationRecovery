@@ -48,7 +48,7 @@ from tabulate import tabulate
 sys.path.insert(0, 'src')
 
 from hpo import build_single_start_nn_icp_factory, evaluate_icp, make_beta_sweep_objective
-from synthetic import CloudStyle
+from synthetic import CloudStyle, PointCloudObserver
 
 # ---------------------------------------------------------------------------
 # Configuration — mirrors notebook 5 so results are directly comparable
@@ -60,6 +60,7 @@ MAX_ITER              = 400
 TOL                   = 0.1
 GEN_KWARGS            = dict(n=500, t_scale=8.0)
 NOISE_STD             = 0.1
+OBSERVER_SEED         = 42
 RELIABILITY_THRESHOLD = 0.8
 
 TUNING_SEEDS  = list(range(N_SEEDS))
@@ -84,6 +85,19 @@ def study_name(style: CloudStyle, dropout_prob: float) -> str:
         Study name, unique per (style, dropout).
     """
     return f'icp_hpo_{style}_beta_singlestart_dropout{dropout_prob:g}'
+
+
+def build_observer(dropout_prob: float) -> PointCloudObserver:
+    """Build the observer for one study, at this script's fixed noise level.
+
+    Args:
+        dropout_prob: Dropout probability the study is run at.
+
+    Returns:
+        A PointCloudObserver combining `dropout_prob` with NOISE_STD, seeded so
+        tuning and holdout runs observe reproducibly.
+    """
+    return PointCloudObserver(seed=OBSERVER_SEED, noise_std=NOISE_STD, dropout_prob=dropout_prob)
 
 
 def run_study(
@@ -118,7 +132,7 @@ def run_study(
     study.optimize(
         make_beta_sweep_objective(
             style, TUNING_SEEDS, GEN_KWARGS, MAX_ITER, TOL,
-            dropout_prob=dropout_prob, noise_std=NOISE_STD, n_jobs=n_jobs,
+            observer=build_observer(dropout_prob), n_jobs=n_jobs,
         ),
         n_trials=n_trials,
         show_progress_bar=True,
@@ -175,7 +189,7 @@ def validate_on_holdout(
     factory = build_single_start_nn_icp_factory(FixedTrial(trial.params), MAX_ITER, TOL)
     return evaluate_icp(
         factory, style, HOLDOUT_SEEDS, GEN_KWARGS, trimmer=None,
-        dropout_prob=dropout_prob, noise_std=NOISE_STD, n_jobs=n_jobs,
+        observer=build_observer(dropout_prob), n_jobs=n_jobs,
     )
 
 

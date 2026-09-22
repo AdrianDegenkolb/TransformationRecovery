@@ -1,8 +1,9 @@
+import numpy as np
 import pytest
 
 from experiment_runner import MultiSeedSyntheticICPResult, _quiet, fit_multi_seed
 from icp import ICP, ICPResult, MultiStartICP
-from synthetic import SyntheticExperiment
+from synthetic import PointCloudObserver, SyntheticExperiment
 from transformation import RigidTransformation
 
 
@@ -81,6 +82,32 @@ def test_fit_multi_seed_runs_and_restores_verbose():
     result = fit_multi_seed(icp, seeds=[0, 1], verbose=False, experiment_kwargs={'n': 15})
     assert set(result.r.keys()) == {0, 1}
     assert icp.verbose is True
+
+
+def test_fit_multi_seed_observer_degrades_only_the_fitted_copies():
+    """The observer must not touch exp.P/exp.Q, which true_residuals relies on."""
+    icp = ICP(max_iter=3, verbose=False)
+    observer = PointCloudObserver(seed=0, noise_std=0.5, dropout_prob=0.2)
+    result = fit_multi_seed(
+        icp, seeds=[0], observer=observer, verbose=False, experiment_kwargs={'n': 40}
+    )
+
+    exp, _ = result[0]
+    np.testing.assert_allclose(exp.P.points, exp.T1.apply(exp.S).points)
+    np.testing.assert_allclose(exp.Q.points, exp.T2.apply(exp.S).points)
+
+
+def test_fit_multi_seed_observes_each_seed_independently():
+    """Every seed must get its own observation draw, not a replay of seed 0's."""
+    icp = ICP(max_iter=1, verbose=False)
+    observer = PointCloudObserver(seed=0, dropout_prob=0.5)
+    result = fit_multi_seed(
+        icp, seeds=[0, 1, 2], observer=observer, verbose=False, experiment_kwargs={'n': 200}
+    )
+
+    # Same-sized clouds observed through identical RNG state would drop identically.
+    kept = [len(r.cloud_history[0]) for r in result.results]
+    assert len(set(kept)) > 1
 
 
 class _ExplodingTrimmer:

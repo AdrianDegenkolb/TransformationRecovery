@@ -11,7 +11,7 @@ from experiment_runner import fit_multi_seed
 from feature_extractor import FeatureExtractor, GeometricFeatureExtractor, RobustGeometricFeatureExtractor
 from icp import ICP, ICPCallback, MultiStartICP, SigmaAnnealingCallback
 from matcher import GaussianMatcher, Matcher, NearestNeighborMatcher
-from synthetic import CloudStyle
+from synthetic import CloudStyle, PerfectObserver, PointCloudObserver
 from trimmer import ClusteringTrimmer, Trimmer
 
 # Feature dimensionality per extractor, used to size the trimmer's DBSCAN eps
@@ -276,14 +276,13 @@ def evaluate_icp(
     seeds: list[int],
     gen_kwargs: dict[str, Any],
     trimmer: Trimmer | None = None,
-    dropout_prob: float = 0.0,
-    noise_std: float = 0.0,
+    observer: PointCloudObserver = PerfectObserver(),
     n_jobs: int = 1,
 ) -> dict[str, float]:
     """Evaluate an ICP configuration over multiple random seeds.
 
     Delegates the actual per-seed looping to `fit_multi_seed`, so trimming and
-    dropout are handled consistently with the rest of the codebase.
+    observation are handled consistently with the rest of the codebase.
 
     Args:
         icp_factory:  Callable returning a fresh ICP/MultiStartICP instance.
@@ -297,9 +296,8 @@ def evaluate_icp(
         gen_kwargs:   Kwargs for SyntheticExperiment.generate (n, t_scale, ...).
                       Must not contain 'style' or 'seed'.
         trimmer:      Optional trimmer applied to (P, Q) before each ICP call.
-        dropout_prob: Probability of dropping individual points from the observation.
-        noise_std:    Std of per-point Gaussian noise added to the observation
-                      (see SyntheticExperiment.observe_point_clouds).
+        observer:     Simulates dropout/noise when observing each experiment's P and Q
+                      (see synthetic.PointCloudObserver). Defaults to a PerfectObserver.
         n_jobs:       Worker processes for parallelizing across seeds. Keep the
                       icp_factory's own MultiStartICP (if any) at n_jobs=1 when
                       using this, since nesting pools oversubscribes CPU cores.
@@ -316,7 +314,7 @@ def evaluate_icp(
     """
     icp = icp_factory()
     result = fit_multi_seed(
-        icp, seeds=seeds, dropout_prob=dropout_prob, noise_std=noise_std, verbose=False,
+        icp, seeds=seeds, observer=observer, verbose=False,
         trimmer=trimmer, experiment_kwargs={**gen_kwargs, "style": style},
         n_jobs=n_jobs,
     )
@@ -359,8 +357,7 @@ def make_objective(
     gen_kwargs: dict[str, Any],
     max_iter: int,
     tol: float,
-    dropout_prob: float = 0.0,
-    noise_std: float = 0.0,
+    observer: PointCloudObserver = PerfectObserver(),
     multistart_n_jobs: int = 1,
     n_jobs: int = 1,
 ) -> Callable[[optuna.Trial], float]:
@@ -381,12 +378,11 @@ def make_objective(
         gen_kwargs:         Kwargs for SyntheticExperiment.generate (n, t_scale, ...).
         max_iter:           Fixed ICP max_iter.
         tol:                Fixed ICP tol.
-        dropout_prob:       Probability of dropping individual points from the observation,
-                            applied identically across all trials so the search optimizes
-                            for this noise regime rather than only the clean case.
-        noise_std:          Std of per-point Gaussian noise added to the observation
-                            (see SyntheticExperiment.observe_point_clouds), applied
-                            identically across all trials.
+        observer:           Simulates dropout/noise when observing each experiment's P
+                            and Q (see synthetic.PointCloudObserver), applied identically
+                            across all trials so the search optimizes for that observation
+                            regime rather than only the clean case. Defaults to a
+                            PerfectObserver.
         multistart_n_jobs:  Worker processes for MultiStartICP trials. See build_icp_factory.
                             Keep at 1 when n_jobs != 1, since nesting pools
                             oversubscribes CPU cores.
@@ -401,7 +397,7 @@ def make_objective(
         trimmer = build_trimmer(trial, n=gen_kwargs.get("n", 2000))
         metrics = evaluate_icp(
             factory, style, seeds, gen_kwargs, trimmer=trimmer,
-            dropout_prob=dropout_prob, noise_std=noise_std, n_jobs=n_jobs,
+            observer=observer, n_jobs=n_jobs,
         )
         return _record_trial_metrics(trial, metrics)
 
@@ -414,8 +410,7 @@ def make_beta_sweep_objective(
     gen_kwargs: dict[str, Any],
     max_iter: int,
     tol: float,
-    dropout_prob: float = 0.0,
-    noise_std: float = 0.0,
+    observer: PointCloudObserver = PerfectObserver(),
     n_jobs: int = 1,
 ) -> Callable[[optuna.Trial], float]:
     """Create an Optuna objective over the reduced single-start `beta` search space.
@@ -436,13 +431,11 @@ def make_beta_sweep_objective(
         gen_kwargs:   Kwargs for SyntheticExperiment.generate (n, t_scale, ...).
         max_iter:     Fixed ICP max_iter.
         tol:          Fixed ICP tol.
-        dropout_prob: Probability of dropping individual points from the observation.
-                      Dropout perturbs each point's k-NN neighborhood and therefore
-                      its features, so it directly affects how much a high `beta`
-                      can be trusted — run separate studies per value rather than
-                      letting it vary within one.
-        noise_std:    Std of per-point Gaussian noise added to the observation
-                      (see SyntheticExperiment.observe_point_clouds).
+        observer:     Simulates dropout/noise when observing each experiment's P and Q
+                      (see synthetic.PointCloudObserver). Both perturb each point's k-NN
+                      neighborhood and therefore its features, so they directly affect
+                      how much a high `beta` can be trusted — run separate studies per
+                      observation regime rather than letting it vary within one.
         n_jobs:       Worker processes for parallelizing evaluate_icp across seeds.
 
     Returns:
@@ -452,7 +445,7 @@ def make_beta_sweep_objective(
         factory = build_single_start_nn_icp_factory(trial, max_iter, tol)
         metrics = evaluate_icp(
             factory, style, seeds, gen_kwargs, trimmer=None,
-            dropout_prob=dropout_prob, noise_std=noise_std, n_jobs=n_jobs,
+            observer=observer, n_jobs=n_jobs,
         )
         return _record_trial_metrics(trial, metrics)
 

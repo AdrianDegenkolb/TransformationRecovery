@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import Literal
 
@@ -20,16 +21,16 @@ class SyntheticExperiment:
     S is transformed twice to produce the noiseless ground-truth clouds
     P = T1(S) and Q = T2(S). The ground-truth transformation mapping P to Q
     is T_gt = T2 ∘ T1⁻¹. Dropout and measurement noise are simulated
-    separately, on demand, via `observe_point_clouds` — P and Q themselves
-    stay exact so they can serve as a noise-free reference for evaluating
-    recovered transformations.
+    separately, on demand, by a PointCloudObserver — P and Q themselves stay
+    exact so they can serve as a noise-free reference for evaluating recovered
+    transformations.
 
     Attributes:
         S:    Source point cloud (N, 3).
-        T1:   First random rigid transformation (with noise).
-        T2:   Second random rigid transformation (with noise).
-        P:    T1(S) — first observed cloud.
-        Q:    T2(S) — second observed cloud.
+        T1:   First random rigid transformation.
+        T2:   Second random rigid transformation.
+        P:    T1(S) — first ground-truth cloud.
+        Q:    T2(S) — second ground-truth cloud.
         T_gt: Ground-truth transformation T2 ∘ T1⁻¹ mapping P to Q.
     """
 
@@ -73,7 +74,7 @@ class SyntheticExperiment:
 
         Returns:
             SyntheticExperiment with S, T1, T2, P, Q, and T_gt = T2 ∘ T1⁻¹.
-            P and Q are exact (noiseless); use `observe_point_clouds` to simulate
+            P and Q are exact (noiseless); use a PointCloudObserver to simulate
             dropout and measurement noise.
         """
         if seed is not None:
@@ -88,30 +89,77 @@ class SyntheticExperiment:
 
         return SyntheticExperiment(S=S, T1=T1, T2=T2, P=P, Q=Q, T_gt=T_gt)
 
-    def observe_point_clouds(self, dropout_prob: float, noise_std: float = 0.0) -> tuple[PointCloud, PointCloud]:
+
+class PointCloudObserver:
+    """Turns an experiment's exact point cloud into a realistic observation of it.
+
+    Applies per-point dropout (points the sensor missed entirely) followed by
+    per-point Gaussian noise (measurement error on the points it did see).
+    Owns its own random generator, so observations are reproducible from `seed`
+    without touching global numpy random state.
+
+    Each `observe` call consumes fresh randomness, so observing two clouds in
+    sequence (e.g. an experiment's P and Q) yields independent dropout masks and
+    noise — as two separate physical measurements would.
+    """
+
+    def __init__(self, seed: int = 42, noise_std: float = 0.0, dropout_prob: float = 0.0) -> None:
         """
-        Simulates observing P and Q: omits individual points with probability
-        dropout_prob, then perturbs the surviving points with independent
-        per-point Gaussian noise. P and Q are perturbed independently, so
-        even the ground-truth transformation cannot map one exactly onto the
-        other after this — that's the point, it mimics two independent noisy
-        measurements of the same underlying geometry.
+        Args:
+            seed:         Seed for this observer's random generator.
+            noise_std:    Std of the per-point Gaussian noise added to observed points.
+            dropout_prob: Probability of missing any individual point.
+        """
+        self.seed = seed
+        self.noise_std = noise_std
+        self.dropout_prob = dropout_prob
+        self.rng = np.random.default_rng(seed)
+
+    def observe(self, point_cloud: PointCloud) -> PointCloud:
+        """Produce a noisy, incomplete observation of `point_cloud`.
 
         Args:
-            dropout_prob: The probability to miss individual points in the observation.
-            noise_std:    Std of the per-point Gaussian noise added to surviving points.
+            point_cloud: The exact PointCloud (N, 3) to observe.
 
         Returns:
-            tuple containing observed and incomplete point clouds P and Q
+            Observed PointCloud (M, 3) with M <= N, dropped points removed and
+            the survivors perturbed by Gaussian noise. The input is not modified.
         """
-        indices_for_P = np.random.choice([True, False], size=len(self.P), replace=True, p=[1 - dropout_prob, dropout_prob])
-        indices_for_Q = np.random.choice([True, False], size=len(self.Q), replace=True, p=[1 - dropout_prob, dropout_prob])
-        p_points = self.P.points[indices_for_P]
-        q_points = self.Q.points[indices_for_Q]
-        if noise_std > 0:
-            p_points = p_points + np.random.randn(*p_points.shape) * noise_std
-            q_points = q_points + np.random.randn(*q_points.shape) * noise_std
-        return PointCloud(p_points), PointCloud(q_points)
+        points = point_cloud.points
+        if self.dropout_prob > 0:
+            points = points[self.rng.random(len(points)) >= self.dropout_prob]
+        if self.noise_std > 0:
+            points = points + self.rng.normal(0.0, self.noise_std, size=points.shape)
+        return PointCloud(points)
+
+    def spawn(self) -> PointCloudObserver:
+        """Return an observer with the same settings but an independent RNG stream.
+
+        Required whenever observers cross a process boundary: pickling one
+        observer into several worker processes copies its generator state, so
+        every worker would otherwise replay the identical dropout mask and noise
+        draws. Spawning per experiment also keeps results independent of whether
+        the caller ran sequentially or in parallel.
+
+        Returns:
+            A copy of this observer whose randomness is statistically
+            independent of this one's and of every other spawned child.
+        """
+        child = copy.copy(self)
+        child.rng = self.rng.spawn(1)[0]
+        return child
+
+
+class PerfectObserver(PointCloudObserver):
+    """An idealized observer: sees every point, exactly where it is.
+
+    Equivalent to a PointCloudObserver with no dropout and no noise, so
+    `observe` returns the cloud unchanged. Serves as the default for callers
+    that want the clean case without constructing an observer themselves.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(seed=42, noise_std=0.0, dropout_prob=0.0)
 
 
 def _make_cloud(n: int, style: CloudStyle, jitter_std: float = 0.0) -> NDArray[np.float64]:

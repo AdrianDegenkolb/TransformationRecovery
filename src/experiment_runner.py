@@ -20,7 +20,7 @@ from error_metrics import convergence_to_global_opt_ratio, nearest_neighbor_resi
 from feature_extractor import RobustGeometricFeatureExtractor
 from icp import ICP, ICPResult, MultiStartICP, MultiStartICPResult
 from matcher import NearestNeighborMatcher
-from synthetic import SyntheticExperiment
+from synthetic import PerfectObserver, PointCloudObserver, SyntheticExperiment
 from transformation import RigidTransformation
 from trimmer import ClusteringTrimmer, Trimmer
 
@@ -101,7 +101,7 @@ class MultiSeedSyntheticICPResult:
         and Q share point-for-point ground-truth correspondence by construction (both
         are transformations of the same source cloud S, see
         SyntheticExperiment.generate), and that correspondence survives dropout and noise because
-        `observe_point_clouds` only noises points from the copies used for fitting
+        the PointCloudObserver only degrades the copies used for fitting
         The true residual ||T_pred(exp.P)_i - exp.Q_i|| directly
         measures pure transformation-recovery error with no irreducible noise
         floor — it is 0 iff `result.transformation` exactly equals `exp.T_gt`.
@@ -167,8 +167,7 @@ def _quiet(icp: ICP | MultiStartICP) -> Generator[None, None, None]:
 def _fit_one_seed(
     icp: ICP | MultiStartICP,
     seed: int,
-    dropout_prob: float,
-    noise_std: float,
+    observer: PointCloudObserver,
     trimmer: Trimmer | None,
     experiment_kwargs: dict[str, Any],
 ) -> tuple[int, SyntheticExperiment, ICPResult | MultiStartICPResult]:
@@ -178,7 +177,7 @@ def _fit_one_seed(
     and sent to worker processes by ProcessPoolExecutor.
     """
     exp = SyntheticExperiment.generate(**experiment_kwargs, seed=seed)
-    p, q = exp.observe_point_clouds(dropout_prob, noise_std)
+    p, q = observer.observe(exp.P), observer.observe(exp.Q)
     if trimmer is not None:
         p, q = trimmer.trim([p, q])
     result = icp.fit(p, q)
@@ -188,8 +187,7 @@ def _fit_one_seed(
 def fit_multi_seed(
     icp: ICP | MultiStartICP,
     seeds: list[int],
-    dropout_prob: float = 0.0,
-    noise_std: float = 0.0,
+    observer: PointCloudObserver = PerfectObserver(),
     verbose: bool = True,
     trimmer: Trimmer | None = None,
     experiment_kwargs: dict[str, Any] | None = None,
@@ -200,11 +198,13 @@ def fit_multi_seed(
     Args:
         icp:               ICP or MultiStartICP instance to use for fitting.
         seeds:             List of random seeds, one experiment per seed.
-        dropout_prob:      Probability of dropping individual points from the observation.
-        noise_std:         Std of per-point Gaussian noise added to the observation
-                            (see SyntheticExperiment.observe_point_clouds). Applied to
-                            the P/Q copies used for fitting only; exp.P/exp.Q (used by
-                            e.g. `mean_true_residuals`) stay noiseless.
+        observer:          Simulates the dropout/noise of observing each experiment's
+                            P and Q before fitting. Defaults to a PerfectObserver
+                            (clean, complete clouds). Each seed observes through its
+                            own spawned child observer, so results are independent of
+                            seed count and of whether n_jobs runs them in parallel.
+                            Only the copies used for fitting are degraded; exp.P/exp.Q
+                            (used by e.g. `mean_true_residuals`) stay noiseless.
         verbose:           Show seed progress bar if True.
         trimmer:           Optional trimmer applied to (P, Q) before each ICP call.
         experiment_kwargs: Keyword arguments forwarded to SyntheticExperiment.generate.
@@ -226,7 +226,7 @@ def fit_multi_seed(
             results: dict[int, tuple[SyntheticExperiment, ICPResult | MultiStartICPResult]] = {}
             pbar = tqdm(seeds, desc=f"Solving {len(seeds)} seeds", disable=not verbose)
             for seed in pbar:
-                _, exp, result = _fit_one_seed(icp, seed, dropout_prob, noise_std, trimmer, experiment_kwargs)
+                _, exp, result = _fit_one_seed(icp, seed, observer.spawn(), trimmer, experiment_kwargs)
                 results[seed] = (exp, result)
                 # Show the current reliability (fraction of seeds converged to the global opt) in the progress bar.
                 reliability = MultiSeedSyntheticICPResult(results).convergence_to_global_opt_ratio
@@ -235,7 +235,7 @@ def fit_multi_seed(
             max_workers = n_jobs if n_jobs > 0 else None
             with ProcessPoolExecutor(max_workers=max_workers) as pool:
                 future_to_seed = {
-                    pool.submit(_fit_one_seed, icp, seed, dropout_prob, noise_std, trimmer, experiment_kwargs): seed
+                    pool.submit(_fit_one_seed, icp, seed, observer.spawn(), trimmer, experiment_kwargs): seed
                     for seed in seeds
                 }
                 unordered: dict[int, tuple[SyntheticExperiment, ICPResult | MultiStartICPResult]] = {}
@@ -262,6 +262,7 @@ if __name__ == "__main__":
     parser.add_argument("--n-seeds", type=int, default=10, help="Number of random seeds to run.")
     parser.add_argument("--dropout-prob", type=float, default=0.0, help="Probability of dropping individual points from the observation.")
     parser.add_argument("--noise-std", type=float, default=0.1, help="Std of per-point Gaussian noise added to the observation.")
+    parser.add_argument("--observer-seed", type=int, default=42, help="Seed for the observer's dropout/noise draws.")
     parser.add_argument("--verbose", default=True, action="store_true", help="Show progress bar.")
     parser.add_argument("--n-jobs", type=int, default=-1, help="Number of worker processes for parallelization. 1 (default) runs sequentially. -1 uses os.cpu_count().")
     args = parser.parse_args()
@@ -280,8 +281,9 @@ if __name__ == "__main__":
         clusterer=DBSCAN(eps=CLUSTER_EPS, min_samples=min_samples)
     )
 
+    observer = PointCloudObserver(seed=args.observer_seed, noise_std=args.noise_std, dropout_prob=args.dropout_prob)
     icp = ICP(init_align_centroids=True).to_multi_start(n_starts=20, n_jobs=args.n_jobs)
-    result = fit_multi_seed(icp, trimmer=trimmer, seeds=list(range(args.n_seeds)), dropout_prob=args.dropout_prob, noise_std=args.noise_std, verbose=args.verbose, n_jobs=1, experiment_kwargs=experiment_kwargs)
+    result = fit_multi_seed(icp, trimmer=trimmer, seeds=list(range(args.n_seeds)), observer=observer, verbose=args.verbose, n_jobs=1, experiment_kwargs=experiment_kwargs)
 
     print("Results:")
     print(tabulate(

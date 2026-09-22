@@ -5,7 +5,7 @@ pytest.importorskip("probreg")
 
 from probreg_baselines import ProbregCPD, ProbregFilterReg, ProbregGMMTree
 from point_cloud import PointCloud
-from synthetic import SyntheticExperiment
+from synthetic import PointCloudObserver, SyntheticExperiment
 
 _METHODS = [ProbregCPD, ProbregFilterReg, ProbregGMMTree]
 
@@ -49,8 +49,8 @@ def test_probreg_method_records_matching_length_history(method_cls):
     # counts (empty residuals array from an underdetermined per-node system),
     # a probreg-internal limitation unrelated to this adapter.
     exp = SyntheticExperiment.generate(n=200, t_scale=8, style="clustered", seed=1)
-    p, q = exp.observe_point_clouds(dropout_prob=0.0, noise_std=0.01)
-    result = method_cls(maxiter=100).fit(p, q)
+    observer = PointCloudObserver(seed=0, noise_std=0.01)
+    result = method_cls(maxiter=100).fit(observer.observe(exp.P), observer.observe(exp.Q))
 
     assert len(result.transform_history) == result.n_iterations
     assert len(result.mean_residuals) == result.n_iterations
