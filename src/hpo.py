@@ -14,12 +14,6 @@ from matcher import GaussianMatcher, Matcher, NearestNeighborMatcher
 from synthetic import CloudStyle, PerfectObserver, PointCloudObserver
 from trimmer import ClusteringTrimmer, Trimmer
 
-# Feature dimensionality per extractor, used to size the trimmer's DBSCAN eps
-# via the (2*d)**0.5*0.2 heuristic used throughout the notebooks. Both
-# extractors currently have a fixed dimension (RobustGeometricFeatureExtractor's
-# only varies if `quantiles` is overridden, which HPO doesn't currently tune).
-_FEATURE_EXTRACTOR_DIM: dict[str, int] = {"geometric": 9, "robust": 11}
-
 
 def _build_feature_extractor(name: Literal["geometric", "robust"], k: int) -> FeatureExtractor:
     """Construct a feature extractor by name.
@@ -253,7 +247,7 @@ def build_trimmer(trial: optuna.Trial, n: int) -> Trimmer | None:
     extractor = _build_feature_extractor(extractor_name, fe_k)
 
     min_cluster_fraction = trial.suggest_float("min_cluster_fraction", 0.01, 0.3, log=True)
-    d = _FEATURE_EXTRACTOR_DIM[extractor_name]
+    d = extractor.target_dim
     # eps/min_samples were previously fixed constants tuned for one clean-cloud
     # density; exposing their scale factors lets the search correct for point
     # density that shifts under dropout instead of assuming the notebook

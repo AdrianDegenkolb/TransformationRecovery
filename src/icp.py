@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 from numpy.typing import NDArray
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -206,8 +207,8 @@ class ICP:
 
     def __init__(
         self,
-        matcher: Matcher | None = None,
         init_align_centroids: bool = True,
+        matcher: Matcher | None = None,
         max_iter: int = 100,
         tol: float = 1e-6,
         verbose: bool = False,
@@ -216,12 +217,13 @@ class ICP:
     ):
         """
         Args:
+            init_align_centroids: If True, initialize the transformation by aligning the 
+                            centroids of the source and target point clouds.
             matcher:        Correspondence algorithm for the E-step.
                             Defaults to NearestNeighborMatcher.
-            init_align_centroids: If True, initialize the transformation by aligning the centroids of the source and target point clouds.
+            
             max_iter:       Maximum number of EM iterations.
             tol:            Convergence threshold on ||R_step - I||_F + ||t_step||.
-            verbose:        Show a progress bar if True.
             callbacks:      Optional list of ICPCallback instances called before
                             each E-step (e.g. SigmaAnnealingCallback).
             record_history: If False, skip recording cloud_history and
@@ -231,6 +233,7 @@ class ICP:
                             point cloud + correspondence set per iteration per
                             trial. mean_residuals/transform_history/deltas are
                             always recorded (cheap, and needed for convergence).
+            verbose:        Show a progress bar if True.
         """
         self.matcher = matcher or NearestNeighborMatcher()
         self.max_iter = max_iter
@@ -242,10 +245,6 @@ class ICP:
 
     def fit(self, source: PointCloud, target: PointCloud) -> ICPResult:
         """Run ICP to find the rigid transformation mapping source onto target.
-
-        Calls ``matcher.prepare(source, target)`` once before the loop.
-        Feature caching is automatic for invariant extractors; non-invariant
-        extractors still benefit from target-side caching.
 
         Args:
             source: Source PointCloud (N, 3).
@@ -263,26 +262,32 @@ class ICP:
 
         current = source
         if self.init_align_centroids:
+            # Pre-align the centroids of the source and target point clouds
             accumulated = self._fit_translation_only(current, target)
             current = accumulated.apply(current)
         else:
             accumulated = RigidTransformation.identity()
 
+        # precompute feature vectors for source and target clouds, 
+        # if the matcher is invariant to transformations.
         self.matcher.prepare(source, target)
+
         t0 = time.perf_counter()
         pbar = tqdm(range(self.max_iter), desc="ICP", disable=not self.verbose)
         for i in pbar:
             for cb in self.callbacks:
                 cb.on_iteration_start(i, self)
 
+            # E step: find correspondences between the current source and target clouds
             matching = self.matcher.match(current, target)
             src_pc = PointCloud(matching.source_points)
             tgt_pc = PointCloud(matching.target_positions)
+            # M step: fit a rigid transformation from the matched source to target points
             transformation = RigidTransformation.fit(src_pc, tgt_pc, weights=matching.weights)
+
             accumulated = transformation.compose(accumulated)
             residual = float(get_residuals(matching, transformation.apply(src_pc)).mean())
             delta = _windowed_delta(transform_history, accumulated)
-
             pbar.set_postfix(residual=f"{residual:.4f}")
             if self.record_history:
                 cloud_history.append(current)
@@ -308,10 +313,9 @@ class ICP:
         )
 
     def _fit_translation_only(self, source: PointCloud, target: PointCloud) -> RigidTransformation:
-        """Fit a translation-only transformation from source to target.
-
-        The translation is computed as the difference between the centroids of the source and target point clouds.
-        The hypothesis is that this increases the convergence speed of ICP, especially when the initial misalignment is large.
+        """
+        Fit a translation-only transformation from source to target computed as the difference between the centroids of the source and target point clouds.
+        The hypothesis is that starting with aligned centroids will help the ICP algorithm converge faster and avoid local minima.
 
         Args:
             source: Source PointCloud (N, 3).
@@ -327,36 +331,34 @@ class ICP:
     
     def to_multi_start(
         self, 
+        rotation_sampler: Callable[[int, np.random.Generator], list[NDArray[np.float64]]] = sample_dispersed_rotations,
         n_starts: int = 20,
         n_jobs: int = -1, 
+        residual_threshold: float = 1e-6, 
         seed: int = 42, 
-        verbose: bool = True, 
-        residual_threshold: float = 1e-3, 
-        rotation_sampler: Callable[[int, np.random.Generator], list[NDArray[np.float64]]] = sample_dispersed_rotations
+        verbose: bool = True
         ) -> MultiStartICP:
         """Wrap this ICP instance in a MultiStartICP with the given parameters.
 
         Args:
-            icp:                 Configured ICP instance reused across all trials.
+            rotation_sampler:    Callable(n, rng) -> list of n (3, 3) SO(3) rotations
+                                                used to seed the starts. Defaults to greedy
+                                                farthest-point sampling; pass e.g.
+                                                sample_uniform_rotations for plain i.i.d. sampling.
             n_starts:            Number of starting rotations to try.
+            residual_threshold:  Mean residual below which a converged trial triggers early stopping of remaining trials.
             n_jobs:              Worker processes. -1 uses os.cpu_count().
             seed:                Optional random seed for reproducible rotation sampling.
             verbose:             Show a progress bar if True.
-            residual_threshold:  Mean residual below which a converged trial
-                                    triggers early stopping of remaining trials.
-            rotation_sampler:    Callable(n, rng) -> list of n (3, 3) SO(3) rotations
-                                    used to seed the starts. Defaults to greedy
-                                    farthest-point sampling; pass e.g.
-                                    sample_uniform_rotations for plain i.i.d. sampling.
         """
         return MultiStartICP(
             icp=self,
+            rotation_sampler=rotation_sampler,
+            residual_threshold=residual_threshold,
             n_starts=n_starts,
             n_jobs=n_jobs,
             seed=seed,
             verbose=verbose,
-            residual_threshold=residual_threshold,
-            rotation_sampler=rotation_sampler
         )
 
 
@@ -377,26 +379,26 @@ class MultiStartICP:
     def __init__(
         self,
         icp: ICP,
+        rotation_sampler: Callable[[int, np.random.Generator], list[NDArray[np.float64]]] = sample_dispersed_rotations,
+        residual_threshold: float = 1e-6,
         n_starts: int = 20,
         n_jobs: int = -1,
         seed: int = 42,
         verbose: bool = True,
-        residual_threshold: float = 1e-3,
-        rotation_sampler: Callable[[int, np.random.Generator], list[NDArray[np.float64]]] = sample_dispersed_rotations,
     ):
         """
         Args:
             icp:                 Configured ICP instance reused across all trials.
-            n_starts:            Number of starting rotations to try.
-            n_jobs:              Worker processes. -1 uses os.cpu_count().
-            seed:                Optional random seed for reproducible rotation sampling.
-            verbose:             Show a progress bar if True.
-            residual_threshold:  Mean residual below which a converged trial
-                                 triggers early stopping of remaining trials.
             rotation_sampler:    Callable(n, rng) -> list of n (3, 3) SO(3) rotations
                                  used to seed the starts. Defaults to greedy
                                  farthest-point sampling; pass e.g.
                                  sample_uniform_rotations for plain i.i.d. sampling.
+            n_starts:            Number of starting rotations to try.
+            residual_threshold:  Mean residual below which a converged trial
+                                 triggers early stopping of remaining trials.
+            n_jobs:              Worker processes. -1 uses os.cpu_count().
+            seed:                Optional random seed for reproducible rotation sampling.
+            verbose:             Show a progress bar if True.
         """
         self.icp = icp
         self.n_starts = n_starts

@@ -41,7 +41,7 @@ class Trimmer(ABC):
     """Abstract base class for point cloud trimmers.
 
     A trimmer reduces a point cloud by removing geometrically redundant points,
-    lowering the cost of downstream matching and ICP without sacrificing accuracy.
+    lowering the cost of downstream matching and ICP.
     """
 
     @abstractmethod

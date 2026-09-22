@@ -11,18 +11,15 @@ from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
-from sklearn.cluster import DBSCAN
 from tabulate import tabulate
 from tqdm import tqdm
 
 from algebra_utils import rotation_angle
 from error_metrics import convergence_to_global_opt_ratio, nearest_neighbor_residuals, true_residuals as compute_true_residuals
-from feature_extractor import RobustGeometricFeatureExtractor
 from icp import ICP, ICPResult, MultiStartICP, MultiStartICPResult
-from matcher import NearestNeighborMatcher
 from synthetic import PerfectObserver, PointCloudObserver, SyntheticExperiment
 from transformation import RigidTransformation
-from trimmer import ClusteringTrimmer, Trimmer
+from trimmer import Trimmer
 
 
 @dataclass
@@ -187,27 +184,20 @@ def _fit_one_seed(
 def fit_multi_seed(
     icp: ICP | MultiStartICP,
     seeds: list[int],
-    observer: PointCloudObserver = PerfectObserver(),
-    verbose: bool = True,
-    trimmer: Trimmer | None = None,
     experiment_kwargs: dict[str, Any] | None = None,
+    observer: PointCloudObserver = PerfectObserver(),
+    trimmer: Trimmer | None = None,
     n_jobs: int = 1,
+    verbose: bool = True,
 ) -> MultiSeedSyntheticICPResult:
     """Generate and solve a synthetic experiment per seed and report the results.
 
     Args:
         icp:               ICP or MultiStartICP instance to use for fitting.
         seeds:             List of random seeds, one experiment per seed.
-        observer:          Simulates the dropout/noise of observing each experiment's
-                            P and Q before fitting. Defaults to a PerfectObserver
-                            (clean, complete clouds). Each seed observes through its
-                            own spawned child observer, so results are independent of
-                            seed count and of whether n_jobs runs them in parallel.
-                            Only the copies used for fitting are degraded; exp.P/exp.Q
-                            (used by e.g. `mean_true_residuals`) stay noiseless.
-        verbose:           Show seed progress bar if True.
-        trimmer:           Optional trimmer applied to (P, Q) before each ICP call.
         experiment_kwargs: Keyword arguments forwarded to SyntheticExperiment.generate.
+        observer:          Returns imperfect observations of each experiment's points clouds P and Q. Can be used to test more realistic scenarios. Defaults to PerfectObserver, which returns the original clouds without any dropout or noise.
+        trimmer:           Optional trimmer applied to (P, Q) before each ICP call.
         n_jobs:            Worker processes for parallelizing across seeds. 1 (default)
                             runs sequentially in-process. -1
                             uses os.cpu_count(). If `icp` is a MultiStartICP, its own
@@ -215,6 +205,7 @@ def fit_multi_seed(
                             seed; combining that with n_jobs != 1 here nests process
                             pools and oversubscribes CPU cores, so parallelize only one
                             of the two loops.
+        verbose:           Show seed progress bar if True.
 
     Returns:
         MultiSeedSyntheticICPResult with one experiment and result per seed.
@@ -259,35 +250,24 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Run synthetic experiments and ICP on them.")
+    parser.add_argument("--n-points", type=int, default=2000, help="Number of random seeds to run.")
+    parser.add_argument("--multi-start", default=False,action="store_true", help="Use MultiStartICP instead of ICP.")
     parser.add_argument("--n-seeds", type=int, default=10, help="Number of random seeds to run.")
-    parser.add_argument("--dropout-prob", type=float, default=0.0, help="Probability of dropping individual points from the observation.")
-    parser.add_argument("--noise-std", type=float, default=0.1, help="Std of per-point Gaussian noise added to the observation.")
-    parser.add_argument("--observer-seed", type=int, default=42, help="Seed for the observer's dropout/noise draws.")
+    parser.add_argument("--n-starts", type=int, default=20, help="Number of random seeds to run.")
     parser.add_argument("--verbose", default=True, action="store_true", help="Show progress bar.")
     parser.add_argument("--n-jobs", type=int, default=-1, help="Number of worker processes for parallelization. 1 (default) runs sequentially. -1 uses os.cpu_count().")
     args = parser.parse_args()
 
-    experiment_kwargs: dict[str, Any] = {'n': 2000, 't_scale': 8.0, 'style': 'clustered'}
-
-    K = 19
-    EPS_SCALING=0.1246
-    MIN_SAMPLES_SCALING=0.7766
-    CLUSTER_EPS = (2 * RobustGeometricFeatureExtractor.target_dim) ** 0.5 * EPS_SCALING
-    MIN_CLUSTER_FRACTION = 0.0131
-    min_samples = max(2, int(np.log(experiment_kwargs['n']) * MIN_SAMPLES_SCALING))
-    trimmer=ClusteringTrimmer(
-        feature_extractor=RobustGeometricFeatureExtractor(k=K), 
-        min_cluster_fraction=MIN_CLUSTER_FRACTION,
-        clusterer=DBSCAN(eps=CLUSTER_EPS, min_samples=min_samples)
-    )
-
-    observer = PointCloudObserver(seed=args.observer_seed, noise_std=args.noise_std, dropout_prob=args.dropout_prob)
-    icp = ICP(init_align_centroids=True).to_multi_start(n_starts=20, n_jobs=args.n_jobs)
-    result = fit_multi_seed(icp, trimmer=trimmer, seeds=list(range(args.n_seeds)), observer=observer, verbose=args.verbose, n_jobs=1, experiment_kwargs=experiment_kwargs)
+    experiment_kwargs: dict[str, Any] = {'n': args.n_points, 't_scale': 8.0, 'style': 'muscle-fiber'}
+    icp = ICP()
+    if args.multi_start:
+        icp = icp.to_multi_start(n_starts=args.n_starts, n_jobs=args.n_jobs)
+        
+    result = fit_multi_seed(icp, seeds=list(range(args.n_seeds)), verbose=args.verbose, n_jobs=1, experiment_kwargs=experiment_kwargs)
 
     print("Results:")
     print(tabulate(
         zip(result.rotation_errors, result.translation_errors, result.mean_true_residuals, result.mean_closest_point_residuals, result.durations_s),
-        headers=["Rotation Error (deg)", "Translation Error", "Mean True Residual", "Mean Closest-Point Residual", "Duration (s)"],
-        floatfmt=".4f"
+        headers=["Rotation Error (°)", "Translation Error", "Mean True Residual", "Mean Closest-Point Residual", "Duration (s)"],
+        floatfmt=".2f", tablefmt="rounded_outline"
     ))
