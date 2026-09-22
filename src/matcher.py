@@ -44,16 +44,25 @@ def _joint_knn(
     """Find k nearest neighbors in a joint (position, feature) space.
 
     Positions are jointly z-scored across source and target; features (already
-    z-scored by the caller) are scaled by beta. Both are concatenated into one
-    vector per point before building the KDTree, so beta controls feature influence
-    relative to spatial distance.
+    z-scored by the caller) are scaled so that beta controls feature influence
+    relative to spatial distance. Both are concatenated into one vector per point
+    before building the KDTree.
+
+    The feature block is scaled by ``beta * sqrt(3 / D)``, not by beta alone. Each
+    z-scored dimension contributes about the same amount to a squared distance, so
+    an unscaled position block contributes ~3 and an unscaled feature block ~D:
+    raw beta would make effective feature influence grow like ``beta * sqrt(D)``,
+    silently re-weighting features whenever the extractor's width changed. With the
+    ``sqrt(3 / D)`` correction both blocks contribute equally at beta = 1, and beta
+    means the same thing at every D.
 
     Args:
         source_points: (N, 3) source coordinates.
         target_points: (M, 3) target coordinates.
         feat_src_z:    (N, D) z-scored source features.
         feat_tgt_z:    (M, D) z-scored target features.
-        beta:          Scale of feature dimensions relative to spatial coordinates.
+        beta:          Influence of the whole feature block relative to the whole
+                       position block. beta = 1 weights them equally.
         k:             Number of neighbors to return per source point.
 
     Returns:
@@ -61,14 +70,19 @@ def _joint_knn(
         to physical (spatial) units.
     """
     n = len(source_points)
+    n_dim_pos = source_points.shape[1]
+    n_dim_feat = feat_src_z.shape[1]
     all_pts  = np.vstack([source_points, target_points])
     pos_mean = all_pts.mean()
     pos_std  = all_pts.std() + 1e-8
     pos_src_z = (source_points - pos_mean) / pos_std  # (N, 3)
     pos_tar_z = (target_points - pos_mean) / pos_std  # (M, 3)
 
-    joint_src = np.hstack([pos_src_z, beta * feat_src_z])  # (N, 3+D)
-    joint_tgt = np.hstack([pos_tar_z, beta * feat_tgt_z])  # (M, 3+D)
+    # Equalise the two blocks' contribution to squared distance before applying beta.
+    feat_scale = beta * np.sqrt(n_dim_pos / n_dim_feat) if n_dim_feat else 0.0
+
+    joint_src = np.hstack([pos_src_z, feat_scale * feat_src_z])  # (N, 3+D)
+    joint_tgt = np.hstack([pos_tar_z, feat_scale * feat_tgt_z])  # (M, 3+D)
     dists, nbr_idx = KDTree(joint_tgt).query(joint_src, k=k)    # joint dist
     dists *= pos_std                                            # rescale to physical units
     return dists.reshape(n, k), nbr_idx.reshape(n, k)
@@ -151,8 +165,11 @@ class NearestNeighborMatcher(Matcher):
         Args:
             feature_extractor: Optional extractor producing a (N, D) feature matrix per
                                cloud. When None, falls back to purely spatial matching.
-            beta:              Scale of feature dimensions relative to spatial coordinates
-                               in the joint KDTree. Only used when feature_extractor is set.
+            beta:              Influence of the whole feature block relative to the whole
+                               position block in the joint KDTree. Normalised for feature
+                               width, so beta = 1 weights the two equally at any D and a
+                               tuned beta stays valid when D changes. Only used when
+                               feature_extractor is set.
         """
         self.feature_extractor = feature_extractor
         self.beta = beta
@@ -259,8 +276,10 @@ class GaussianMatcher(Matcher):
                                - 'append':   features appended to coordinates for k-NN.
             alpha:             Cosine similarity weight (additive mode only).
                                Setting alpha=0 disables the feature term.
-            beta:              Scale of feature dimensions relative to spatial coordinates
-                               in the joint KDTree (append mode only).
+            beta:              Influence of the whole feature block relative to the whole
+                               position block in the joint KDTree (append mode only).
+                               Normalised for feature width, so beta = 1 weights the two
+                               equally at any D and a tuned beta stays valid when D changes.
         """
         self.sigma = sigma
         self.k = k
