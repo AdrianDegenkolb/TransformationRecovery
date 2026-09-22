@@ -1,10 +1,15 @@
 """Point-cloud residual and error-metric computations.
 
-A residual is the distance between paired points, however the pairing was
-established: reusing an already-computed Matching, freshly matching via
-nearest-neighbor, or assuming known ground-truth correspondence. This module
-is the one place that math lives, rather than being reimplemented separately
-in icp.py, experiment_runner.py, and utils.py.
+For a single run several error metrics exist:
+- Rotation error: The angle (in degrees) between the fitted and ground-truth rotation.
+- Translation error: The distance between the fitted and ground-truth translation.
+- Closest point residual: The per-point distance from the transformed source to the nearest neighbor in the target.
+- True residual: The per-point distance from the transformed source to the corresponding point in the target, assuming a known ground-truth correspondence.
+
+The most reliable of these is the true residual, since it uses the known ground-truth correspondence.
+In order to measure the reliability of a method across multiple runs, we can compute the following:
+- Convergence ratio: The fraction of runs that have converged to a solution.
+- Convergence to global optimum ratio: The fraction of runs that have converged to the globally optimal solution.
 """
 from __future__ import annotations
 
