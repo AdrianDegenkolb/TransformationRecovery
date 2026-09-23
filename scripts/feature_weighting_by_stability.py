@@ -10,7 +10,7 @@ distance it participates in. This script asks whether re-weighting the dimension
 by their measured stability recovers any of the reliability lost to dropout.
 
 Weighting must happen AFTER z-scoring. Scaling a dimension before z-scoring is
-cancelled exactly by the z-scoring itself (_joint_zscore normalizes each dimension
+cancelled exactly by the z-scoring itself (zscore_jointly normalizes each dimension
 to unit variance), so this cannot be implemented as a FeatureExtractor wrapper --
 it has to reach into the matcher's cached, already-normalized features.
 

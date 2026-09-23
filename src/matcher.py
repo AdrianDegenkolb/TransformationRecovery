@@ -8,29 +8,7 @@ from numpy.typing import NDArray
 from scipy.spatial import KDTree
 
 from point_cloud import PointCloud
-from feature_extractor import FeatureExtractor, zscored_features
-
-
-def _joint_zscore(
-    feat_src: NDArray[np.float64],
-    feat_tgt: NDArray[np.float64],
-) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """Z-score two feature matrices jointly using their pooled mean and std.
-
-    Mirrors the normalisation performed by ``zscored_features`` so that cached
-    raw features can be re-scored on demand without calling the extractor again.
-
-    Args:
-        feat_src: Raw source feature matrix of shape (N, D).
-        feat_tgt: Raw target feature matrix of shape (M, D).
-
-    Returns:
-        Tuple ``(feat_src_z, feat_tgt_z)`` normalised with the pooled statistics.
-    """
-    all_raw = np.concatenate([feat_src, feat_tgt], axis=0)
-    mean = all_raw.mean(axis=0)
-    std  = all_raw.std(axis=0) + 1e-8
-    return (feat_src - mean) / std, (feat_tgt - mean) / std
+from feature_extractor import FeatureExtractor, zscore_jointly, zscored_features
 
 
 def joint_knn(
@@ -196,7 +174,7 @@ class NearestNeighborMatcher(Matcher):
         feat_tgt_raw = self.feature_extractor.get_features(target)
         if self.feature_extractor.is_transformation_invariant:
             feat_src_raw = self.feature_extractor.get_features(source)
-            self._feat_src_z, self._feat_tgt_z = _joint_zscore(feat_src_raw, feat_tgt_raw)
+            self._feat_src_z, self._feat_tgt_z = zscore_jointly([feat_src_raw, feat_tgt_raw])
             self._prepared = True
         else:
             self._feat_tgt_raw = feat_tgt_raw
@@ -218,7 +196,7 @@ class NearestNeighborMatcher(Matcher):
                 feat_src_z, feat_tgt_z = self._feat_src_z, self._feat_tgt_z
             elif self._feat_tgt_raw is not None:
                 feat_src_raw = self.feature_extractor.get_features(source)
-                feat_src_z, feat_tgt_z = _joint_zscore(feat_src_raw, self._feat_tgt_raw)
+                feat_src_z, feat_tgt_z = zscore_jointly([feat_src_raw, self._feat_tgt_raw])
             else:
                 feat_src_z, feat_tgt_z = zscored_features(self.feature_extractor, [source, target])
             _, nbr_idx = joint_knn(
@@ -310,7 +288,7 @@ class GaussianMatcher(Matcher):
         feat_tgt_raw = self.feature_extractor.get_features(target)
         if self.feature_extractor.is_transformation_invariant:
             feat_src_raw = self.feature_extractor.get_features(source)
-            self._feat_src_z, self._feat_tgt_z = _joint_zscore(feat_src_raw, feat_tgt_raw)
+            self._feat_src_z, self._feat_tgt_z = zscore_jointly([feat_src_raw, feat_tgt_raw])
             self._prepared = True
         else:
             self._feat_tgt_raw = feat_tgt_raw
@@ -337,7 +315,7 @@ class GaussianMatcher(Matcher):
                 feat_src_z, feat_tgt_z = self._feat_src_z, self._feat_tgt_z
             elif self._feat_tgt_raw is not None:
                 feat_src_raw = self.feature_extractor.get_features(source)
-                feat_src_z, feat_tgt_z = _joint_zscore(feat_src_raw, self._feat_tgt_raw)
+                feat_src_z, feat_tgt_z = zscore_jointly([feat_src_raw, self._feat_tgt_raw])
             else:
                 feat_src_z, feat_tgt_z = zscored_features(self.feature_extractor, [source, target])
 

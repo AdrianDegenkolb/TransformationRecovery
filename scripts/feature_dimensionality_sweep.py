@@ -3,7 +3,7 @@
 Sweep: does feature dimensionality cost ICP anything?
 
 Motivation: append mode concatenates 3 position dims with D feature dims into one
-KDTree (matcher._joint_knn). The concern is that large D degrades the tree, either
+KDTree (matcher.joint_knn). The concern is that large D degrades the tree, either
 in speed (tree -> linear scan) or in quality (distance concentration). Before
 building a dimensionality-reducing component, we measure whether D costs anything.
 
@@ -19,12 +19,12 @@ Two arms disentangle "more dimensions" from "more information":
                 compressor could recover.
 
 SUPERSEDED (2026-09-22): this script's beta policies predate the fix in
-matcher._joint_knn, which now scales the feature block by beta*sqrt(3/D) internally.
+matcher.joint_knn, which now scales the feature block by beta*sqrt(3/D) internally.
 Under the current code the 'fixed' policy is already the corrected one, and 'sqrtD'
 double-corrects. Kept as-is to reproduce the recorded numbers in the experiment note;
 use 'fixed' only for new runs.
 
-Beta confound: _joint_zscore normalizes each feature dim to unit variance, so the
+Beta confound: zscore_jointly normalizes each feature dim to unit variance, so the
 feature block's norm grows like beta*sqrt(D). Raising D therefore silently raises
 effective feature influence. Each arm is run under two beta policies:
 

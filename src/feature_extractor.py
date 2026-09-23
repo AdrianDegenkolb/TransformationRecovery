@@ -9,28 +9,61 @@ from scipy.spatial import KDTree
 from point_cloud import PointCloud
 
 
+def zscore_jointly(
+    feature_matrices: list[NDArray[np.float64]],
+) -> list[NDArray[np.float64]]:
+    """Z-score several feature matrices against their pooled mean and standard deviation.
+
+    Pooled rather than per-matrix: the matrices must land in one shared feature space
+    to be comparable at all, and normalising each separately would erase genuine
+    differences between the clouds while pretending their scales already agree.
+
+    Normalisation is a consumer-side concern rather than part of a FeatureExtractor's
+    output contract. It exists so that whatever weights a consumer applies downstream
+    — ``beta`` in append mode, ``alpha`` in additive mode, DBSCAN's ``eps`` in the
+    trimmer — mean the same thing regardless of the raw feature scale. A corollary
+    worth knowing: any scaling applied to features *before* this step is cancelled
+    exactly by it, so per-dimension weighting has to happen afterwards.
+
+    Args:
+        feature_matrices: One (N_i, D) raw feature matrix per cloud, all sharing D.
+
+    Returns:
+        One normalised matrix per input, in the same order and with the same shapes.
+
+    Raises:
+        ValueError: If no matrix is given, or if they disagree on the feature width D.
+    """
+    if not feature_matrices:
+        raise ValueError("zscore_jointly needs at least one feature matrix.")
+    widths = {features.shape[1] for features in feature_matrices}
+    if len(widths) > 1:
+        raise ValueError(f"Feature matrices must share a width, got {sorted(widths)}.")
+
+    pooled = np.concatenate(feature_matrices, axis=0)
+    mean = pooled.mean(axis=0)
+    std = pooled.std(axis=0) + 1e-8
+    return [(features - mean) / std for features in feature_matrices]
+
+
 def zscored_features(
     feature_extractor: FeatureExtractor,
     point_clouds: list[PointCloud],
 ) -> list[NDArray[np.float64]]:
-    """Compute z-scored feature matrices for a list of point clouds using aggregated statistics.
+    """Extract features for several point clouds and z-score them jointly.
 
-    Z-scoring uses target mean and std so that beta (append mode) and alpha (additive
-    mode) are interpretable regardless of the raw feature scale.
+    Convenience wrapper for callers holding clouds rather than cached feature
+    matrices. See ``zscore_jointly`` for the normalisation itself and why it is
+    pooled across clouds.
 
     Args:
         feature_extractor: Extractor producing a (N, D) feature matrix per cloud.
-        point_clouds: a list of point cloud.
+        point_clouds: Clouds to extract from.
 
     Returns:
-        List of normalized feature arrays
+        One normalised feature matrix per cloud, in the same order.
     """
-    features_per_point_cloud = [feature_extractor.get_features(cloud) for cloud in point_clouds]
-    all_features = np.concatenate(features_per_point_cloud, axis=0)
-    all_features_mean = all_features.mean(axis=0)
-    all_features_std = all_features.std(axis=0) + 1e-8
-    normalized_features = [(features - all_features_mean) / all_features_std for features in features_per_point_cloud]
-    return normalized_features
+    return zscore_jointly([feature_extractor.get_features(cloud) for cloud in point_clouds])
 
 
 def angle_pair_indices(
