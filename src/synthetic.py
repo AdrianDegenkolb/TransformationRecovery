@@ -162,6 +162,59 @@ class PerfectObserver(PointCloudObserver):
         super().__init__(seed=42, noise_std=0.0, dropout_prob=0.0)
 
 
+def make_correspondence_pair(
+    p: PointCloud,
+    q: PointCloud,
+    dropout_prob: float = 0.0,
+    rng: np.random.Generator | None = None,
+) -> tuple[PointCloud, PointCloud, NDArray[np.int64]]:
+    """Build a partial, shuffled correspondence pair from an index-aligned cloud pair.
+
+    Independently drops points from ``p`` and ``q`` (simulating sensor dropout on
+    each side), then randomly permutes the surviving target points so that
+    correspondence cannot be read off from point order. Yields realistic
+    partial-overlap, order-agnostic correspondence problems with known
+    ground-truth matches.
+
+    Args:
+        p:            Source cloud, index-aligned with q (p[i] <-> q[i]), e.g.
+                      a SyntheticExperiment's P.
+        q:            Target cloud, index-aligned with p, e.g. a
+                      SyntheticExperiment's Q.
+        dropout_prob: Per-point probability of dropping a point, applied
+                      independently to each side.
+        rng:          Optional random generator for reproducibility.
+
+    Returns:
+        Tuple (p_obs, q_obs, correspondence):
+            p_obs:          Observed source cloud after dropout.
+            q_obs:          Observed target cloud after dropout and permutation.
+            correspondence: (len(q_obs),) int64 array; correspondence[i] is the
+                             index into p_obs.points of the true match for
+                             q_obs.points[i], or -1 if that target point's
+                             source correspondent was dropped.
+    """
+    rng = rng or np.random.default_rng()
+    n = len(p)
+    if len(q) != n:
+        raise ValueError(f"p and q must be index-aligned (same length), got {len(p)} and {len(q)}")
+
+    keep_p = rng.random(n) >= dropout_prob
+    keep_q = rng.random(n) >= dropout_prob
+
+    p_obs = PointCloud(p.points[keep_p])
+    p_obs_index = np.full(n, -1, dtype=np.int64)   # original index -> position in p_obs
+    p_obs_index[keep_p] = np.arange(keep_p.sum())
+
+    q_kept_original_idx = np.flatnonzero(keep_q)
+    q_perm_original_idx = rng.permutation(q_kept_original_idx)
+
+    q_obs = PointCloud(q.points[q_perm_original_idx])
+    correspondence = p_obs_index[q_perm_original_idx]
+
+    return p_obs, q_obs, correspondence
+
+
 def _make_cloud(n: int, style: CloudStyle, jitter_std: float = 0.0) -> NDArray[np.float64]:
     """Dispatch to the appropriate cloud generator.
 
