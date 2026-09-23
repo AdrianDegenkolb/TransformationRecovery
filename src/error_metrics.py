@@ -10,6 +10,25 @@ The most reliable of these is the true residual, since it uses the known ground-
 In order to measure the reliability of a method across multiple runs, we can compute the following:
 - Convergence ratio: The fraction of runs that have converged to a solution.
 - Convergence to global optimum ratio: The fraction of runs that have converged to the globally optimal solution.
+
+All of the above score a *fitted transformation*. A second family of metrics scores a
+FeatureExtractor instead, before and independently of any ICP run, because a feature
+extractor is pulled between two objectives that trade off against each other:
+
+1. **Robustness** — a feature must survive perturbation. Points are observed with noise
+   and dropout, so a descriptor computed on the source and on the target is computed
+   from two different realisations of the same neighbourhood. Measured by
+   `feature_correspondence_correlation`.
+2. **Locality** — a feature must describe the neighbourhood of *this* point and not of
+   the cloud at large, or it cannot distinguish one point from another. Measured
+   indirectly by `mutual_nearest_neighbor_fraction`, which collapses when a descriptor
+   stops being discriminative.
+
+The tension is direct: robustness is bought by estimating over a larger neighbourhood,
+which averages perturbation away but also makes the descriptor less local. Pushed far
+enough, every point gets a near-identical descriptor — maximally robust and completely
+useless. Neither metric detects this alone, which is why both are needed: a feature can
+score near 1.0 on the first while the second collapses.
 """
 from __future__ import annotations
 
@@ -21,7 +40,8 @@ from numpy.typing import NDArray
 from tabulate import tabulate
 
 from algebra_utils import rotation_angle
-from matcher import Matching, NearestNeighborMatcher
+from feature_extractor import FeatureExtractor, zscored_features
+from matcher import Matching, NearestNeighborMatcher, joint_knn
 from point_cloud import PointCloud
 from synthetic import SyntheticExperiment
 from transformation import RigidTransformation
@@ -117,6 +137,133 @@ def get_error_metrics(
     true_res = true_residuals(transformation.apply(experiment.P), experiment.Q)
 
     return ErrorMetrics(rot_err, t_err, closest_point_residuals, true_res)
+
+
+# --- Feature-extractor characterisation -------------------------------------------
+# The two metrics below score a FeatureExtractor rather than a fitted transformation.
+# See the module docstring for the robustness/locality trade-off they measure.
+
+
+def feature_correspondence_correlation(
+    feat_source: NDArray[np.float64],
+    feat_target: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Per-dimension correlation of each feature across true correspondences.
+
+    **Measures robustness.** The premise of feature-augmented matching is that a true
+    correspondence has near-zero feature distance. Perturbing each cloud independently
+    breaks that premise, because the descriptor at a surviving point is then computed
+    from a different realisation of its neighbourhood on each side. This reports how
+    much of the agreement each dimension retains.
+
+    Correlation rather than an absolute error because the matcher z-scores every
+    dimension before use (see ``matcher.joint_knn``), which discards scale and offset:
+    only co-variation survives into the metric the KDTree actually searches.
+
+    A dimension scoring near 1.0 is trustworthy under the perturbation applied; one
+    near 0.0 contributes noise to every distance it participates in, since the joint
+    tree weights all z-scored dimensions equally.
+
+    Args:
+        feat_source: (n_matched, D) source features.
+        feat_target: (n_matched, D) target features, row-aligned with feat_source so
+                     that row i of each is the same ground-truth correspondence.
+
+    Returns:
+        (D,) array of Pearson correlations. A dimension with no variance on either
+        side yields 0.0 rather than NaN, since a constant feature carries no signal.
+
+    Raises:
+        ValueError: If the two feature matrices are not row-aligned.
+    """
+    if feat_source.shape != feat_target.shape:
+        raise ValueError(
+            f"Feature matrices must be row-aligned by correspondence, got "
+            f"{feat_source.shape} and {feat_target.shape}."
+        )
+
+    source_centered = feat_source - feat_source.mean(axis=0)
+    target_centered = feat_target - feat_target.mean(axis=0)
+    denom = np.linalg.norm(source_centered, axis=0) * np.linalg.norm(target_centered, axis=0)
+    numer = (source_centered * target_centered).sum(axis=0)
+    return np.where(denom > 1e-12, numer / np.maximum(denom, 1e-12), 0.0)
+
+
+def mutual_nearest_neighbor_fraction(
+    source: PointCloud,
+    target: PointCloud,
+    feature_extractor: FeatureExtractor | None = None,
+    beta: float = 1.0,
+    correspondence: NDArray[np.int64] | None = None,
+) -> float:
+    """Fraction of true pairs that are each other's nearest neighbor in the joint space.
+
+    **Measures locality, and is the most direct predictor of whether matching works.**
+    A true pair counts only when the target point is the source point's nearest
+    neighbor *and* the source point is that target point's nearest neighbor, in the
+    same joint (position, feature) space ``NearestNeighborMatcher`` searches. Requiring
+    the match to be mutual rejects hub points that many sources map onto.
+
+    This is what features are supposed to buy: pulling corresponding points together
+    relative to everything else. Comparing the value at ``beta=0`` (positions only)
+    with ``beta>0`` isolates the contribution of the features themselves.
+
+    It is also the measurement that catches an over-smoothed descriptor. A feature
+    estimated over a very large neighborhood scores highly on
+    ``feature_correspondence_correlation`` while describing the cloud rather than the
+    point; every point then looks alike, and this fraction collapses.
+
+    Depends on the current alignment, since positions are part of the space. Pass
+    ground-truth-aligned clouds to ask whether the metric *preserves* correct
+    correspondences; pass misaligned clouds to ask whether it can *find* them.
+
+    Args:
+        source:            Source PointCloud (N, 3).
+        target:            Target PointCloud (M, 3).
+        feature_extractor: Extractor to characterise. None scores positions alone,
+                           which is the baseline the features have to beat.
+        beta:              Feature influence relative to position, as in
+                           ``NearestNeighborMatcher``.
+        correspondence:    (N,) ground-truth target index per source point, or -1
+                           where the source point has no counterpart. None assumes
+                           the clouds are index-aligned, which requires equal lengths.
+
+    Returns:
+        Fraction in [0, 1] over the source points that have a counterpart. Returns
+        0.0 when no source point has one.
+
+    Raises:
+        ValueError: If correspondence is None and the clouds differ in length.
+    """
+    n_source = len(source.points)
+    if correspondence is None:
+        if n_source != len(target.points):
+            raise ValueError(
+                f"Index-aligned correspondence needs equal lengths, got "
+                f"{n_source} and {len(target.points)}; pass `correspondence` instead."
+            )
+        correspondence = np.arange(n_source, dtype=np.int64)
+
+    if feature_extractor is None:
+        feat_source = np.zeros((n_source, 0), dtype=np.float64)
+        feat_target = np.zeros((len(target.points), 0), dtype=np.float64)
+    else:
+        feat_source, feat_target = zscored_features(feature_extractor, [source, target])
+
+    # Nearest neighbour in both directions, through the matcher's own joint metric so
+    # that the beta normalisation and position z-scoring match what ICP would see.
+    _, forward = joint_knn(source.points, target.points, feat_source, feat_target, beta, k=1)
+    _, backward = joint_knn(target.points, source.points, feat_target, feat_source, beta, k=1)
+    forward, backward = forward[:, 0], backward[:, 0]
+
+    has_match = correspondence >= 0
+    if not np.any(has_match):
+        return 0.0
+
+    matched_source = np.flatnonzero(has_match)
+    matched_target = correspondence[has_match]
+    mutual = (forward[matched_source] == matched_target) & (backward[matched_target] == matched_source)
+    return float(np.mean(mutual))
 
 
 def convergence_ratio(icp_results: list[ICPResult | MultiStartICPResult]) -> float:
