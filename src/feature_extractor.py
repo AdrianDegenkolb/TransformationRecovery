@@ -33,9 +33,6 @@ def zscored_features(
     return normalized_features
 
 
-ANGLE_PAIR_SEED: int = 0
-
-
 def angle_pair_indices(
     k: int,
     n_angle_pairs: int,
@@ -68,7 +65,7 @@ def angle_pair_indices(
 
     # Sampled directly rather than by subsetting triu_indices, which would itself
     # allocate O(k^2).
-    rng = np.random.default_rng(ANGLE_PAIR_SEED)
+    rng = np.random.default_rng(0)
     ti = rng.integers(0, k, size=n_angle_pairs)
     tj = rng.integers(0, k - 1, size=n_angle_pairs)
     tj = tj + (tj >= ti)  # uniform over the k-1 ranks other than ti
