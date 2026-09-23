@@ -57,7 +57,7 @@ def _build_matcher(trial: optuna.Trial, max_iter: int) -> tuple[Matcher, list[IC
 
     feature_extractor_name = trial.suggest_categorical("feature_extractor", ["none", "geometric", "robust"])
     if feature_extractor_name != "none":
-        fe_k = trial.suggest_int("fe_k", low=2, high=50)
+        fe_k = trial.suggest_int("fe_k", low=2, high=320, log=True)
         feature_extractor = _build_feature_extractor(cast(Literal["geometric", "robust"], feature_extractor_name), fe_k)
         if matching == "soft":
             feature_mode = cast(Literal["additive", "append"], trial.suggest_categorical("feature_mode", ["additive", "append"]))
@@ -99,7 +99,7 @@ def build_icp_factory(
     Tuned parameters:
         matching:           categorical ['hard', 'soft']
         feature_extractor:  categorical ['none', 'geometric', 'robust']
-        fe_k:               int [2, 50]                        (feature_extractor != 'none')
+        fe_k:               int [2, 320] log                   (feature_extractor != 'none')
         feature_mode:       categorical ['additive', 'append']  (soft + feature_extractor != 'none')
         alpha:              float [0.0, 10.0]                  (feature_mode == 'additive')
         beta:               float [0.0, 10.0]                  (feature_mode == 'append', or hard + feature_extractor != 'none')
@@ -180,7 +180,7 @@ def build_single_start_nn_icp_factory(
 
     Tuned parameters:
         feature_extractor:  categorical ['geometric', 'robust']
-        fe_k:               int [2, 50]
+        fe_k:               int [2, 320] log
         beta:               float [0.0, 10.0]
 
     Calling trial.suggest_* is idempotent within a trial, so the returned factory
@@ -199,7 +199,7 @@ def build_single_start_nn_icp_factory(
         Literal["geometric", "robust"],
         trial.suggest_categorical("feature_extractor", ["geometric", "robust"]),
     )
-    fe_k = trial.suggest_int("fe_k", low=2, high=50)
+    fe_k = trial.suggest_int("fe_k", low=2, high=320, log=True)
     beta = trial.suggest_float("beta", low=0.0, high=10.0)
     feature_extractor = _build_feature_extractor(extractor_name, fe_k)
 
@@ -217,7 +217,7 @@ def build_trimmer(trial: optuna.Trial, n: int) -> Trimmer | None:
     Tuned parameters:
         use_trimmer:          categorical [True, False]
         trimmer_extractor:    categorical ['geometric', 'robust']  (use_trimmer only)
-        trimmer_fe_k:         int [2, 50]                          (use_trimmer only)
+        trimmer_fe_k:         int [2, 320] log                     (use_trimmer only)
         min_cluster_fraction: log-uniform [0.01, 0.3]              (use_trimmer only)
         eps_scaling:          log-uniform [0.1, 0.5]               (use_trimmer only); DBSCAN eps = (2*d)**0.5 * eps_scaling
         min_samples_scaling:  log-uniform [0.5, 2.0]               (use_trimmer only); DBSCAN min_samples = log(n) * min_samples_scaling
@@ -243,7 +243,7 @@ def build_trimmer(trial: optuna.Trial, n: int) -> Trimmer | None:
         Literal["geometric", "robust"],
         trial.suggest_categorical("trimmer_extractor", ["geometric", "robust"]),
     )
-    fe_k = trial.suggest_int("trimmer_fe_k", low=2, high=50)
+    fe_k = trial.suggest_int("trimmer_fe_k", low=2, high=320, log=True)
     extractor = _build_feature_extractor(extractor_name, fe_k)
 
     min_cluster_fraction = trial.suggest_float("min_cluster_fraction", 0.01, 0.3, log=True)
