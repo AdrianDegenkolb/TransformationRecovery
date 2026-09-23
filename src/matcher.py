@@ -33,7 +33,7 @@ def _joint_zscore(
     return (feat_src - mean) / std, (feat_tgt - mean) / std
 
 
-def _joint_knn(
+def joint_knn(
     source_points: NDArray[np.float64],
     target_points: NDArray[np.float64],
     feat_src_z: NDArray[np.float64],
@@ -221,7 +221,7 @@ class NearestNeighborMatcher(Matcher):
                 feat_src_z, feat_tgt_z = _joint_zscore(feat_src_raw, self._feat_tgt_raw)
             else:
                 feat_src_z, feat_tgt_z = zscored_features(self.feature_extractor, [source, target])
-            _, nbr_idx = _joint_knn(
+            _, nbr_idx = joint_knn(
                 source.points, target.points, feat_src_z, feat_tgt_z, self.beta, k=1,
             )
             nn_indices = nbr_idx[:, 0]
@@ -343,7 +343,7 @@ class GaussianMatcher(Matcher):
 
         n = len(source.points)
         if feat_src_z is not None and feat_tgt_z is not None and self.feature_mode == 'append':
-            dists, nbr_idx = _joint_knn(
+            dists, nbr_idx = joint_knn(
                 source.points, target.points, feat_src_z, feat_tgt_z, self.beta, k=k,
             )
         else:

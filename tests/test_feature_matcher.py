@@ -201,3 +201,64 @@ class TestPrepare:
             atol=1e-10,
             err_msg="prepare() must not change match results for invariant extractor.",
         )
+
+
+@pytest.mark.parametrize("n_feat", [1, 3, 11, 40])
+def test_beta_normalisation_makes_block_influence_independent_of_width(n_feat: int) -> None:
+    """At beta=1 the feature block contributes as much squared distance as positions.
+
+    Each z-scored dimension contributes roughly equally to a squared distance, so
+    without the sqrt(3/D) correction in joint_knn the feature block would dominate
+    more and more as D grew, silently re-weighting features whenever the extractor
+    changed width.
+    """
+    rng = np.random.default_rng(0)
+    n = 200
+    points = rng.standard_normal((n, 3))
+    feat_src, feat_tgt = rng.standard_normal((n, n_feat)), rng.standard_normal((n, n_feat))
+
+    pos_std = np.vstack([points, points]).std() + 1e-8
+    pos_z = (points - np.vstack([points, points]).mean()) / pos_std
+    scale = np.sqrt(3 / n_feat)
+
+    # Mean squared block distance between random (i.e. non-corresponding) pairs.
+    pos_contribution = np.mean(np.sum((pos_z - pos_z[::-1]) ** 2, axis=1))
+    feat_contribution = np.mean(np.sum((scale * (feat_src - feat_tgt)) ** 2, axis=1))
+
+    assert feat_contribution == pytest.approx(pos_contribution, rel=0.35)
+
+
+def test_beta_scales_feature_influence_quadratically() -> None:
+    """Doubling beta quadruples the feature block's squared-distance contribution."""
+    rng = np.random.default_rng(1)
+    diff = rng.standard_normal((200, 11))
+    scale = np.sqrt(3 / 11)
+
+    at_1 = np.sum((1.0 * scale * diff) ** 2)
+    at_2 = np.sum((2.0 * scale * diff) ** 2)
+
+    assert at_2 == pytest.approx(4.0 * at_1)
+
+
+def testjoint_knn_matches_hand_computed_scaling() -> None:
+    """joint_knn's neighbour choice agrees with an explicit beta*sqrt(3/D) construction."""
+    from scipy.spatial import KDTree
+
+    from matcher import joint_knn
+
+    rng = np.random.default_rng(2)
+    n, n_feat, beta = 30, 7, 2.5
+    src, tgt = rng.standard_normal((n, 3)), rng.standard_normal((n, 3))
+    feat_src, feat_tgt = rng.standard_normal((n, n_feat)), rng.standard_normal((n, n_feat))
+
+    _, idx = joint_knn(src, tgt, feat_src, feat_tgt, beta=beta, k=1)
+
+    all_pts = np.vstack([src, tgt])
+    pos_std = all_pts.std() + 1e-8
+    pos_src_z = (src - all_pts.mean()) / pos_std
+    pos_tgt_z = (tgt - all_pts.mean()) / pos_std
+    scale = beta * np.sqrt(3 / n_feat)
+    expected_tree = KDTree(np.hstack([pos_tgt_z, scale * feat_tgt]))
+    _, expected_idx = expected_tree.query(np.hstack([pos_src_z, scale * feat_src]), k=1)
+
+    np.testing.assert_array_equal(idx[:, 0], expected_idx)

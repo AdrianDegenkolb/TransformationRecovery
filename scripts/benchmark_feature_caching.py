@@ -43,7 +43,7 @@ from feature_extractor import (
     RobustGeometricFeatureExtractor,
 )
 from icp import ICP
-from matcher import Matcher, Matching, _joint_knn
+from matcher import Matcher, Matching, joint_knn
 from point_cloud import PointCloud
 from synthetic import CloudStyle, SyntheticExperiment
 
@@ -131,7 +131,7 @@ class LiveFeatureMatcher(Matcher):
         feat_src_raw = self.extractor.get_features(source)
         feat_tgt_raw = self.extractor.get_features(target)
         feat_src_z, feat_tgt_z = _joint_zscore(feat_src_raw, feat_tgt_raw)
-        _, nbr_idx = _joint_knn(source.points, target.points, feat_src_z, feat_tgt_z, self.beta, k=1)
+        _, nbr_idx = joint_knn(source.points, target.points, feat_src_z, feat_tgt_z, self.beta, k=1)
         return Matching(source_points=source.points, target_positions=target.points[nbr_idx[:, 0]])
 
 
@@ -190,7 +190,7 @@ class CachedFeatureMatcher(Matcher):
             feat_src_raw = self.extractor.get_features(source)
 
         feat_src_z, feat_tgt_z = _joint_zscore(feat_src_raw, feat_tgt_raw)
-        _, nbr_idx = _joint_knn(source.points, target.points, feat_src_z, feat_tgt_z, self.beta, k=1)
+        _, nbr_idx = joint_knn(source.points, target.points, feat_src_z, feat_tgt_z, self.beta, k=1)
         return Matching(source_points=source.points, target_positions=target.points[nbr_idx[:, 0]])
 
 
