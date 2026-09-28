@@ -4,6 +4,7 @@ import pytest
 from scipy.spatial import KDTree
 
 from error_metrics import (
+    correspondence_margin,
     feature_correspondence_correlation,
     mutual_nearest_neighbor_fraction,
 )
@@ -93,6 +94,67 @@ def test_mutual_nn_fraction_rejects_length_mismatch_without_correspondence(cloud
     """Assuming index alignment across different-length clouds is a usage error."""
     with pytest.raises(ValueError):
         mutual_nearest_neighbor_fraction(cloud, PointCloud(cloud.points[:100]))
+
+
+def test_margin_is_zero_for_identical_clouds(cloud: PointCloud) -> None:
+    """A point sits exactly on its own correspondent, so the numerator vanishes."""
+    margins = correspondence_margin(cloud, cloud)
+    assert margins.shape == (len(cloud.points),)
+    np.testing.assert_allclose(margins, np.zeros(len(cloud.points)), atol=1e-10)
+
+
+def test_margin_crosses_one_exactly_when_the_correspondent_stops_winning() -> None:
+    """Below 1 the true pair is the nearest neighbour; above 1 an impostor is.
+
+    This is the property that makes the margin a refinement of the mutual-NN
+    fraction rather than an unrelated number: they share a decision threshold.
+    """
+    points = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+    source = PointCloud(points)
+    # Nudge each point a little; every correspondent stays nearest.
+    near = PointCloud(points + np.array([0.1, 0.0, 0.0]))
+    # Shift by most of the spacing: an interior source point is now closer to the
+    # target behind it than to its own correspondent ahead of it.
+    far = PointCloud(points + np.array([0.9, 0.0, 0.0]))
+
+    near_margins = correspondence_margin(source, near)
+    far_margins = correspondence_margin(source, far)
+
+    assert np.all(near_margins < 1.0)
+    assert np.all(far_margins[1:] > 1.0), "Interior points lose to the target behind them."
+    assert far_margins[0] < 1.0, "The leading point has no target behind it, so it still wins."
+    assert mutual_nearest_neighbor_fraction(source, near) > mutual_nearest_neighbor_fraction(source, far)
+
+
+def test_margin_ignores_unmatched_points(cloud: PointCloud) -> None:
+    """Source points marked -1 are dropped from the result rather than scored."""
+    correspondence = np.arange(len(cloud.points), dtype=np.int64)
+    correspondence[:50] = -1
+    margins = correspondence_margin(cloud, cloud, correspondence=correspondence)
+    assert margins.shape == (len(cloud.points) - 50,)
+
+
+def test_margin_still_separates_when_the_mnn_fraction_has_saturated() -> None:
+    """The reason this metric exists: a gradient where the fraction reports a flat 1.0.
+
+    Two alignments that both pair every point correctly are indistinguishable to the
+    mutual-NN fraction, but the tighter one has a visibly larger margin.
+    """
+    rng = np.random.default_rng(5)
+    points = rng.uniform(-10, 10, size=(200, 3))
+    source = PointCloud(points)
+    tight = PointCloud(points + rng.normal(0.0, 0.001, size=points.shape))
+    loose = PointCloud(points + rng.normal(0.0, 0.05, size=points.shape))
+
+    assert mutual_nearest_neighbor_fraction(source, tight) == pytest.approx(1.0)
+    assert mutual_nearest_neighbor_fraction(source, loose) == pytest.approx(1.0)
+    assert np.median(correspondence_margin(source, tight)) < np.median(correspondence_margin(source, loose))
+
+
+def test_margin_rejects_length_mismatch_without_correspondence(cloud: PointCloud) -> None:
+    """Assuming index alignment across different-length clouds is a usage error."""
+    with pytest.raises(ValueError):
+        correspondence_margin(cloud, PointCloud(cloud.points[:100]))
 
 
 def test_invert_correspondence_round_trips() -> None:
@@ -193,3 +255,27 @@ def test_rotation_with_angle_hits_the_requested_angle() -> None:
         assert rotation_angle(R, np.eye(3)) == pytest.approx(angle, abs=1e-6)
         np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-10)
         assert np.linalg.det(R) == pytest.approx(1.0)
+
+
+def test_feature_space_metrics_ignore_position(cloud: PointCloud) -> None:
+    """use_positions=False must score the descriptor alone, so moving a cloud changes nothing."""
+    extractor = RobustGeometricFeatureExtractor(k=20)
+    far = PointCloud(cloud.points + np.array([500.0, 0.0, 0.0]))
+
+    near_frac = mutual_nearest_neighbor_fraction(cloud, cloud, extractor, use_positions=False)
+    far_frac = mutual_nearest_neighbor_fraction(cloud, far, extractor, use_positions=False)
+    assert near_frac == far_frac == pytest.approx(1.0)
+
+    # The joint space, by contrast, is position-sensitive and degrades once separated.
+    joint_near = mutual_nearest_neighbor_fraction(cloud, cloud, extractor, beta=1.0)
+    joint_far = mutual_nearest_neighbor_fraction(cloud, far, extractor, beta=1.0)
+    assert joint_far < joint_near == pytest.approx(1.0)
+
+
+def test_feature_space_margin_ignores_beta(cloud: PointCloud) -> None:
+    """Without positions there is no position block for beta to weigh against."""
+    extractor = RobustGeometricFeatureExtractor(k=20)
+    shifted = PointCloud(cloud.points + np.array([3.0, 0.0, 0.0]))
+    a = correspondence_margin(cloud, shifted, extractor, beta=0.5, use_positions=False)
+    b = correspondence_margin(cloud, shifted, extractor, beta=9.0, use_positions=False)
+    np.testing.assert_allclose(a, b)

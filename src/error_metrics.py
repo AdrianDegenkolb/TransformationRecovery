@@ -22,7 +22,8 @@ extractor is pulled between two objectives that trade off against each other:
 2. **Locality** — a feature must describe the neighbourhood of *this* point and not of
    the cloud at large, or it cannot distinguish one point from another. Measured
    indirectly by `mutual_nearest_neighbor_fraction`, which collapses when a descriptor
-   stops being discriminative.
+   stops being discriminative, and on a continuous scale by `correspondence_margin`,
+   which still separates two extractors once that fraction has saturated at 0 or 1.
 
 The tension is direct: robustness is bought by estimating over a larger neighbourhood,
 which averages perturbation away but also makes the descriptor less local. Pushed far
@@ -37,11 +38,12 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.spatial import KDTree
 from tabulate import tabulate
 
 from algebra_utils import rotation_angle
 from feature_extractor import FeatureExtractor, zscored_features
-from matcher import Matching, NearestNeighborMatcher, joint_knn
+from matcher import Matching, NearestNeighborMatcher, joint_embedding, joint_knn
 from point_cloud import PointCloud
 from synthetic import SyntheticExperiment
 from transformation import RigidTransformation
@@ -80,6 +82,28 @@ def true_residuals(p1: PointCloud, p2: PointCloud) -> NDArray[np.float64]:
     relying on the known index-aligned correspondence synthetic experiments provide.
     """
     return np.linalg.norm(p1.points - p2.points, axis=1)
+
+
+def normalized_weight_entropy(weights: NDArray[np.float64]) -> NDArray[np.float64]:
+    """How evenly each source point spreads its soft correspondence over its k neighbours.
+
+    Shannon entropy of each row divided by its maximum, log k. 0 means all weight sits
+    on one neighbour (a hard match); 1 means it is spread evenly over all k.
+
+    Args:
+        weights: float (N, k) per-neighbour weights, each row summing to 1, e.g. from
+                 GaussianMatcher.neighbor_weights.
+
+    Returns:
+        float (N,) normalised entropy in [0, 1]. All zeros for k = 1, where the
+        match is hard by construction.
+    """
+    k = weights.shape[1]
+    if k < 2:
+        return np.zeros(weights.shape[0])
+    # 0 * log 0 = 0 by convention; the where keeps log from ever seeing a zero.
+    plogp = np.where(weights > 0, weights * np.log(np.where(weights > 0, weights, 1.0)), 0.0)
+    return -plogp.sum(axis=1) / np.log(k)
 
 
 @dataclass
@@ -189,12 +213,171 @@ def feature_correspondence_correlation(
     return np.where(denom > 1e-12, numer / np.maximum(denom, 1e-12), 0.0)
 
 
+def _correspondence_and_features(
+    source: PointCloud,
+    target: PointCloud,
+    feature_extractor: FeatureExtractor | None,
+    correspondence: NDArray[np.int64] | None,
+) -> tuple[NDArray[np.int64], NDArray[np.float64], NDArray[np.float64]]:
+    """Resolve the correspondence array and z-scored features both locality metrics need.
+
+    Args:
+        source:            Source PointCloud (N, 3).
+        target:            Target PointCloud (M, 3).
+        feature_extractor: Extractor to characterise, or None for positions alone.
+        correspondence:    (N,) ground-truth target index per source point, -1 where
+                           the source point has no counterpart. None assumes the clouds
+                           are index-aligned.
+
+    Returns:
+        Tuple (correspondence, feat_source, feat_target). The feature matrices are
+        (N, D) and (M, D), or width 0 when feature_extractor is None.
+
+    Raises:
+        ValueError: If correspondence is None and the clouds differ in length.
+    """
+    n_source = len(source.points)
+    if correspondence is None:
+        if n_source != len(target.points):
+            raise ValueError(
+                f"Index-aligned correspondence needs equal lengths, got "
+                f"{n_source} and {len(target.points)}; pass `correspondence` instead."
+            )
+        correspondence = np.arange(n_source, dtype=np.int64)
+
+    if feature_extractor is None:
+        feat_source = np.zeros((n_source, 0), dtype=np.float64)
+        feat_target = np.zeros((len(target.points), 0), dtype=np.float64)
+    else:
+        feat_source, feat_target = zscored_features(feature_extractor, [source, target])
+
+    return correspondence, feat_source, feat_target
+
+
+def _embedding(
+    source: PointCloud,
+    target: PointCloud,
+    feat_source: NDArray[np.float64],
+    feat_target: NDArray[np.float64],
+    beta: float,
+    use_positions: bool,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Place both clouds in the space the locality metrics should search.
+
+    Args:
+        source:        Source PointCloud.
+        target:        Target PointCloud.
+        feat_source:   (N, D) z-scored source features.
+        feat_target:   (M, D) z-scored target features.
+        beta:          Feature influence relative to position; unused without positions.
+        use_positions: True for the matcher's joint (position, feature) space; False
+                       for descriptor space alone.
+
+    Returns:
+        Tuple of the two embedded point sets.
+    """
+    if use_positions:
+        embedded_source, embedded_target, _ = joint_embedding(
+            source.points, target.points, feat_source, feat_target, beta
+        )
+        return embedded_source, embedded_target
+    # Features arrive already jointly z-scored, so plain Euclidean distance on them
+    # is the descriptor-space metric.
+    return feat_source, feat_target
+
+
+def correspondence_margin(
+    source: PointCloud,
+    target: PointCloud,
+    feature_extractor: FeatureExtractor | None = None,
+    beta: float = 1.0,
+    correspondence: NDArray[np.int64] | None = None,
+    use_positions: bool = True,
+) -> NDArray[np.float64]:
+    """Per-pair ratio of the true correspondent's distance to the nearest impostor's.
+
+    **Measures locality on a continuous scale.** A refinement of
+    ``mutual_nearest_neighbor_fraction``, which answers the same question as a yes/no
+    per point and therefore saturates: once every pair matches (or none does), it
+    returns 1.0 (or 0.0) and can no longer separate two configurations. This keeps a
+    gradient on both sides of that threshold, because it reports *by how much* the
+    true correspondent wins or loses rather than merely whether it does.
+
+    For each source point with a counterpart, the ratio is
+
+        ``d(source, true correspondent) / d(source, nearest non-correspondent)``
+
+    measured in the same joint (position, feature) space ``NearestNeighborMatcher``
+    searches. A value below 1 means the correspondent is the nearest target point,
+    i.e. the one-directional half of what the mutual-NN fraction requires; the
+    smaller the value, the larger the margin protecting that match from noise. The
+    ratio is scale-free, so the position z-scoring inside the joint embedding cancels.
+
+    Normalising by the nearest *impostor* rather than by the mean distance over all
+    target points is deliberate. The mean is dominated by far-away points and is
+    close to constant across configurations, so a mean-normalised ratio would mostly
+    re-report the numerator and would not register the over-smoothing failure that
+    matters here: when a descriptor stops discriminating, impostors crowd in around
+    the query point and this ratio rises towards 1 even though absolute feature
+    distances barely move.
+
+    Summarise with the median rather than the mean — the distribution is skewed, and
+    a handful of hopeless points would otherwise dominate.
+
+    Args:
+        source:            Source PointCloud (N, 3).
+        target:            Target PointCloud (M, 3).
+        feature_extractor: Extractor to characterise. None scores positions alone,
+                           which is the baseline the features have to beat.
+        beta:              Feature influence relative to position, as in
+                           ``NearestNeighborMatcher``.
+        correspondence:    (N,) ground-truth target index per source point, or -1
+                           where the source point has no counterpart. None assumes
+                           the clouds are index-aligned, which requires equal lengths.
+        use_positions:     False measures in descriptor space alone, ignoring
+                           position and therefore ``beta``. Use it to score a feature
+                           extractor as such: the joint space mixes in how well the
+                           clouds happen to be aligned, so a descriptor's own
+                           discriminative power cannot be read off it.
+
+    Returns:
+        (n_matched,) array of ratios, one per source point that has a counterpart,
+        in source order. Empty when no source point has one.
+
+    Raises:
+        ValueError: If correspondence is None and the clouds differ in length.
+    """
+    correspondence, feat_source, feat_target = _correspondence_and_features(
+        source, target, feature_extractor, correspondence
+    )
+
+    matched_source = np.flatnonzero(correspondence >= 0)
+    if matched_source.size == 0:
+        return np.empty(0, dtype=np.float64)
+    matched_target = correspondence[matched_source]
+
+    joint_source, joint_target = _embedding(
+        source, target, feat_source, feat_target, beta, use_positions
+    )
+    queries = joint_source[matched_source]
+    true_distance = np.linalg.norm(queries - joint_target[matched_target], axis=1)
+
+    # Two neighbours, because the nearest one may be the true correspondent itself;
+    # the impostor is then the runner-up.
+    distances, neighbours = KDTree(joint_target).query(queries, k=2)
+    correspondent_is_nearest = neighbours[:, 0] == matched_target
+    impostor_distance = np.where(correspondent_is_nearest, distances[:, 1], distances[:, 0])
+
+    return true_distance / np.maximum(impostor_distance, 1e-12)
+
+
 def mutual_nearest_neighbor_fraction(
     source: PointCloud,
     target: PointCloud,
     feature_extractor: FeatureExtractor | None = None,
     beta: float = 1.0,
     correspondence: NDArray[np.int64] | None = None,
+    use_positions: bool = True,
 ) -> float:
     """Fraction of true pairs that are each other's nearest neighbor in the joint space.
 
@@ -227,6 +410,11 @@ def mutual_nearest_neighbor_fraction(
         correspondence:    (N,) ground-truth target index per source point, or -1
                            where the source point has no counterpart. None assumes
                            the clouds are index-aligned, which requires equal lengths.
+        use_positions:     False measures in descriptor space alone, ignoring
+                           position and therefore ``beta``. Use it to score a feature
+                           extractor as such: the joint space mixes in how well the
+                           clouds happen to be aligned, so a descriptor's own
+                           discriminative power cannot be read off it.
 
     Returns:
         Fraction in [0, 1] over the source points that have a counterpart. Returns
@@ -235,26 +423,19 @@ def mutual_nearest_neighbor_fraction(
     Raises:
         ValueError: If correspondence is None and the clouds differ in length.
     """
-    n_source = len(source.points)
-    if correspondence is None:
-        if n_source != len(target.points):
-            raise ValueError(
-                f"Index-aligned correspondence needs equal lengths, got "
-                f"{n_source} and {len(target.points)}; pass `correspondence` instead."
-            )
-        correspondence = np.arange(n_source, dtype=np.int64)
-
-    if feature_extractor is None:
-        feat_source = np.zeros((n_source, 0), dtype=np.float64)
-        feat_target = np.zeros((len(target.points), 0), dtype=np.float64)
-    else:
-        feat_source, feat_target = zscored_features(feature_extractor, [source, target])
+    correspondence, feat_source, feat_target = _correspondence_and_features(
+        source, target, feature_extractor, correspondence
+    )
 
     # Nearest neighbour in both directions, through the matcher's own joint metric so
     # that the beta normalisation and position z-scoring match what ICP would see.
-    _, forward = joint_knn(source.points, target.points, feat_source, feat_target, beta, k=1)
-    _, backward = joint_knn(target.points, source.points, feat_target, feat_source, beta, k=1)
-    forward, backward = forward[:, 0], backward[:, 0]
+    embedded_source, embedded_target = _embedding(
+        source, target, feat_source, feat_target, beta, use_positions
+    )
+    forward = KDTree(embedded_target).query(embedded_source, k=1)[1]
+    backward = KDTree(embedded_source).query(embedded_target, k=1)[1]
+    forward = np.asarray(forward).reshape(-1)
+    backward = np.asarray(backward).reshape(-1)
 
     has_match = correspondence >= 0
     if not np.any(has_match):
