@@ -181,3 +181,15 @@ def test_robust_feature_names_track_quantiles() -> None:
     assert len(names) == extractor.target_dim == 7
     assert names[:2] == ["dist_q10%", "dist_q90%"]
     assert names[-2:] == ["angle_q10%", "angle_q90%"]
+
+
+def test_rotation_with_angle_hits_the_requested_angle() -> None:
+    """A misalignment sweep needs the angle held exactly, not merely bounded."""
+    from algebra_utils import rotation_angle, rotation_with_angle
+
+    rng = np.random.default_rng(0)
+    for angle in (0.0, 15.0, 90.0, 179.0):
+        R = rotation_with_angle(angle, rng)
+        assert rotation_angle(R, np.eye(3)) == pytest.approx(angle, abs=1e-6)
+        np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-10)
+        assert np.linalg.det(R) == pytest.approx(1.0)
