@@ -549,10 +549,12 @@ class ICPResult:
     deltas: list[float] = field(default_factory=list)
 
     def __repr__(self):
-        rows: list[tuple[str, int | RigidTransformation]] = [
+        rows: list[tuple[str, int | RigidTransformation | str]] = [
             ("Converged",  self.converged),
             ("Iterations", self.n_iterations),
             ("Recovered",  self.transformation),
+            ("Duration (s)", f'{self.duration_s:.2f}'),
+            ("Mean Residual", f'{self.mean_residuals[-1]:.2f}' if self.mean_residuals else '0.00'),
         ]
         return tabulate(rows, tablefmt="rounded_outline")
 
