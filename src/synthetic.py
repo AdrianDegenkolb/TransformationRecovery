@@ -138,6 +138,26 @@ class PointCloudObserver:
             points = points + self.rng.normal(0.0, self.noise_std, size=points.shape)
         return PointCloud(points)
 
+    def reset(self) -> PointCloudObserver:
+        """Return an observer with the same settings and its randomness rewound.
+
+        The complement of ``spawn``. Where spawn yields an *independent* stream, this
+        yields the *same* stream from its beginning, so two callers see identical
+        dropout masks and noise.
+
+        Required whenever several methods are to be compared on the same data. An
+        observer's generator advances with every ``spawn``, so passing one instance to
+        several runs in sequence silently gives each run a different realisation of the
+        degradation — turning a paired comparison into an unpaired one and letting the
+        order methods are evaluated in change which of them looks better.
+
+        Returns:
+            A copy of this observer positioned at the start of its own seed's stream.
+        """
+        child = copy.copy(self)
+        child.rng = np.random.default_rng(self.seed)
+        return child
+
     def spawn(self) -> PointCloudObserver:
         """Return an observer with the same settings but an independent RNG stream.
 

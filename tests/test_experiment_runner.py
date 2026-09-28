@@ -120,3 +120,19 @@ def test_fit_multi_seed_restores_verbose_on_exception():
     with pytest.raises(RuntimeError):
         fit_multi_seed(icp, seeds=[0], verbose=False, trimmer=_ExplodingTrimmer(), experiment_kwargs={'n': 15})
     assert icp.verbose is True
+
+
+def test_observer_reset_rewinds_while_spawn_diverges() -> None:
+    """Comparing methods needs identical data; reset gives it, spawn deliberately does not."""
+    from point_cloud import PointCloud
+
+    cloud = PointCloud(np.random.default_rng(0).uniform(-5, 5, size=(200, 3)))
+    observer = PointCloudObserver(seed=7, noise_std=0.1, dropout_prob=0.2)
+
+    first = observer.reset().observe(cloud)
+    observer.spawn()  # advance the parent's generator, as fit_multi_seed does
+    second = observer.reset().observe(cloud)
+    np.testing.assert_allclose(first.points, second.points)
+
+    a, b = observer.spawn().observe(cloud), observer.spawn().observe(cloud)
+    assert a.points.shape != b.points.shape or not np.allclose(a.points, b.points)
