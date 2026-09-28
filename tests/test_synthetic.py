@@ -131,3 +131,11 @@ def test_make_correspondence_pair_rejects_misaligned_clouds() -> None:
     q = PointCloud(np.zeros((4, 3)))
     with pytest.raises(ValueError):
         make_correspondence_pair(p, q)
+
+
+@pytest.mark.parametrize("style", ["random", "clustered", "lattice", "muscle-fiber"])
+def test_generate_normalize_spacing_gives_unit_spacing_for_every_style(style: CloudStyle) -> None:
+    """With normalize_spacing, every style shares the same length unit."""
+    exp = SyntheticExperiment.generate(n=300, seed=0, style=style, normalize_spacing=True)
+    assert exp.S.median_spacing == pytest.approx(1.0)
+    assert exp.P.median_spacing == pytest.approx(1.0)   # rigid transforms keep spacing

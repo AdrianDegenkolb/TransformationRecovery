@@ -59,6 +59,7 @@ class SyntheticExperiment:
         seed: int | None = 42,
         style: CloudStyle = "random",
         jitter_std: float = 0.0,
+        normalize_spacing: bool = True,
     ) -> SyntheticExperiment:
         """Generate a synthetic point cloud experiment with two rigid transformations.
 
@@ -71,6 +72,9 @@ class SyntheticExperiment:
                         or 'muscle-fiber'.
             jitter_std: Std of per-node Gaussian jitter for 'lattice'/'2d-lattice'/'muscle-fiber'
                         styles. Ignored otherwise.
+            normalize_spacing: If True, scale the source cloud to a median point spacing of 1
+                        (see PointCloud.normalize), so that noise, sigma and t_scale are in
+                        units of point spacing and mean the same thing for every style.
 
         Returns:
             SyntheticExperiment with S, T1, T2, P, Q, and T_gt = T2 ∘ T1⁻¹.
@@ -81,6 +85,8 @@ class SyntheticExperiment:
             np.random.seed(seed)
 
         S = PointCloud(_make_cloud(n, style, jitter_std))
+        if normalize_spacing:
+            S = S.normalize()
         T1 = RigidTransformation.random(t_scale=t_scale)
         T2 = RigidTransformation.random(t_scale=t_scale)
         P = T1.apply(S)
