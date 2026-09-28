@@ -5,6 +5,7 @@ Provides four static-method classes:
     ErrorMetricsVisualizer — convergence curves, seed box plots, parameter sweeps.
     ResidualVisualizer     — histograms, field heatmaps, rotation bases.
     OptimizationVisualizer — HPO Pareto front and feature importance.
+    SweepVisualizer        — two-dimensional parameter sweeps as annotated heatmaps.
 """
 from __future__ import annotations
 
@@ -617,6 +618,49 @@ class ErrorMetricsVisualizer:
             if label is not None:
                 ax.legend()
 
+    @staticmethod
+    def plot_reliability_sweep(
+        ax: Axes,
+        x_labels: Sequence[str],
+        reliabilities_per_method: list[NDArray[np.float64]],
+        n_seeds: int,
+        method_labels: list[str],
+        x_label: str = '',
+        title: str = '',
+        colors: list[str] | None = None,
+    ) -> None:
+        """Reliability over a sweep of conditions, one line per method, ±1 standard error.
+
+        The band is the binomial standard error sqrt(p(1-p)/n), so the reader can see
+        whether a gap between two methods is larger than seed-to-seed chance.
+
+        Args:
+            ax:                       Axes to draw on.
+            x_labels:                 Tick label per condition, in sweep order.
+            reliabilities_per_method: Per method, a (len(x_labels),) array of the fraction
+                                      of seeds that reached the global optimum.
+            n_seeds:                  Seeds per condition, for the standard error.
+            method_labels:            Legend label per method.
+            x_label:                  X-axis label.
+            title:                    Axes title.
+            colors:                   Line color per method. Defaults to tab palette.
+        """
+        if colors is None:
+            colors = _DEFAULT_COLORS[:len(reliabilities_per_method)]
+        x = np.arange(len(x_labels))
+        for p, label, color in zip(reliabilities_per_method, method_labels, colors):
+            p = np.asarray(p, dtype=float)
+            se = np.sqrt(p * (1 - p) / n_seeds)
+            ax.plot(x, p, marker='o', ms=5, color=color, linewidth=2, label=label)
+            ax.fill_between(x, np.clip(p - se, 0, 1), np.clip(p + se, 0, 1), alpha=0.25, color=color)
+        ax.set_xticks(x)
+        ax.set_xticklabels(x_labels, fontsize=8)
+        ax.set_ylim(-0.05, 1.05)
+        ax.set_xlabel(x_label)
+        ax.set_ylabel('Reliability')
+        ax.set_title(title)
+        ax.legend()
+
 
 class ResidualVisualizer:
     """Visualisation methods for residual field analysis and rotation recovery."""
@@ -849,6 +893,89 @@ class OptimizationVisualizer:
         ax.set_xlim(0, 1)
         ax.set_xlabel('Relative importance')
         ax.set_title(title)
+
+class SweepVisualizer:
+    """Two-dimensional parameter sweeps drawn as annotated heatmaps.
+
+    A heatmap rather than a 3-D surface, deliberately. Matplotlib's mplot3d orders whole
+    faces by a single depth value, so two surfaces that cross render the crossing as a
+    staircase along cell boundaries unless they are first cut along their intersection.
+    Even done correctly, a grid of a few dozen values gains nothing from being a surface:
+    the shape reads off colour just as well, the exact numbers can be printed in the
+    cells, and no occlusion question arises at all.
+    """
+
+    @staticmethod
+    def plot_heatmap(
+        ax: Axes,
+        values: NDArray[np.float64],
+        x_labels: Sequence[str],
+        y_labels: Sequence[str],
+        x_label: str = "",
+        y_label: str = "",
+        title: str = "",
+        cmap: str = "viridis",
+        value_format: str = ".2f",
+        vmin: float | None = None,
+        vmax: float | None = None,
+        annotate: bool = True,
+    ):
+        """Draw one (len(y_labels), len(x_labels)) grid as an annotated heatmap.
+
+        Args:
+            ax:           Axes to draw on.
+            values:       (rows, cols) array; rows map to y, columns to x.
+            x_labels:     Tick labels along x, in column order.
+            y_labels:     Tick labels along y, in row order.
+            x_label:      Axis label for x.
+            y_label:      Axis label for y.
+            title:        Axes title.
+            cmap:         Colormap name.
+            value_format: Format spec for the printed cell values.
+            vmin:         Lower colour limit; None autoscales. Set it explicitly when
+                          several heatmaps are meant to be compared with one another,
+                          since autoscaled panels put different values at the same hue.
+            vmax:         Upper colour limit; None autoscales.
+            annotate:     Print each cell's value. Worth it on the small grids these
+                          sweeps produce, where the exact number is the point and colour
+                          only conveys the shape.
+
+        Returns:
+            The image artist, for attaching a colorbar.
+
+        Raises:
+            ValueError: If the label counts do not match the array shape.
+        """
+        rows, cols = values.shape
+        if len(y_labels) != rows or len(x_labels) != cols:
+            raise ValueError(
+                f"Labels must match the grid: got {len(y_labels)}x{len(x_labels)} "
+                f"labels for a {rows}x{cols} array."
+            )
+
+        image = ax.imshow(values, cmap=cmap, aspect="auto", origin="lower",
+                          vmin=vmin, vmax=vmax)
+        ax.set_xticks(np.arange(cols))
+        ax.set_xticklabels([str(label) for label in x_labels], rotation=30, ha="right", fontsize=8)
+        ax.set_yticks(np.arange(rows))
+        ax.set_yticklabels([str(label) for label in y_labels], fontsize=8)
+        ax.set_xlabel(x_label)
+        ax.set_ylabel(y_label)
+        ax.set_title(title, fontsize=11)
+        ax.grid(False)
+
+        if annotate:
+            low, high = image.get_clim()
+            span = (high - low) or 1.0
+            for i in range(rows):
+                for j in range(cols):
+                    # Dark text on the light end of the ramp, light text on the dark end.
+                    normalised = (values[i, j] - low) / span
+                    ax.text(j, i, format(values[i, j], value_format),
+                            ha="center", va="center", fontsize=7,
+                            color="black" if normalised > 0.55 else "white")
+        return image
+
 
 def _plot_hist(
     ax: Axes,

@@ -279,3 +279,33 @@ def test_feature_space_margin_ignores_beta(cloud: PointCloud) -> None:
     a = correspondence_margin(cloud, shifted, extractor, beta=0.5, use_positions=False)
     b = correspondence_margin(cloud, shifted, extractor, beta=9.0, use_positions=False)
     np.testing.assert_allclose(a, b)
+
+
+def test_heatmap_rejects_mismatched_labels() -> None:
+    """Silently mislabelled axes would misreport which configuration won."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    from visualization import SweepVisualizer
+
+    fig, ax = plt.subplots()
+    with pytest.raises(ValueError):
+        SweepVisualizer.plot_heatmap(ax, np.zeros((3, 4)), x_labels=['a', 'b'], y_labels=[1, 2, 3])
+    plt.close(fig)
+
+
+def test_heatmap_annotates_every_cell() -> None:
+    """The exact value is the point on these small grids; colour only shows the shape."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    from visualization import SweepVisualizer
+
+    fig, ax = plt.subplots()
+    values = np.arange(12, dtype=float).reshape(3, 4)
+    SweepVisualizer.plot_heatmap(ax, values, x_labels=list('wxyz'), y_labels=[1, 2, 3])
+    assert len(ax.texts) == 12
+    assert {t.get_text() for t in ax.texts} == {format(v, '.2f') for v in values.ravel()}
+    plt.close(fig)
