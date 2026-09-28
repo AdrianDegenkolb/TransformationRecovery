@@ -51,7 +51,7 @@ from hpo import build_single_start_nn_icp_factory, evaluate_icp, make_beta_sweep
 from synthetic import CloudStyle, PointCloudObserver
 
 # ---------------------------------------------------------------------------
-# Configuration — mirrors notebook 5 so results are directly comparable
+# Configuration — mirrors notebook 7 so results are directly comparable
 # ---------------------------------------------------------------------------
 
 N_SEEDS               = 30
@@ -73,7 +73,7 @@ DEFAULT_STORAGE  = 'sqlite:///results/icp_hpo.db'
 def study_name(style: CloudStyle, dropout_prob: float) -> str:
     """Build the Optuna study name for one (style, dropout) combination.
 
-    Deliberately distinct from notebook 5's `icp_hpo_{style}_true_residual`: that
+    Deliberately distinct from notebook 7's `icp_hpo_{style}_true_residual`: that
     study holds trials from the full 17-parameter space, and resuming it under this
     reduced space would have TPE model a mixture of two different search spaces.
 
@@ -146,7 +146,7 @@ def select_best_reliable_trial(study: optuna.Study) -> optuna.trial.FrozenTrial 
 
     Optimizing mean true residual alone can favour a configuration that is very
     accurate on most seeds but fails catastrophically on a few. Filtering by
-    reliability first matches how notebook 5 reports its best config.
+    reliability first matches how notebook 7 reports its best config.
 
     Args:
         study: A completed (or partially completed) study.
@@ -231,7 +231,7 @@ def main() -> None:
     parser.add_argument('--n-trials', type=int, default=150,
                         help='New trials to append per study (default: 150).')
     parser.add_argument('--style', type=str, default='muscle-fiber',
-                        help='Cloud style (default: muscle-fiber, matching notebook 5).')
+                        help='Cloud style (default: muscle-fiber, matching notebook 7).')
     parser.add_argument('--dropout', type=float, nargs='+', default=DEFAULT_DROPOUTS,
                         help='Dropout probabilities, one study each (default: 0.0 0.2).')
     parser.add_argument('--storage', type=str, default=DEFAULT_STORAGE,
