@@ -11,6 +11,53 @@ from point_cloud import PointCloud
 from feature_extractor import FeatureExtractor, zscore_jointly, zscored_features
 
 
+def joint_embedding(
+    source_points: NDArray[np.float64],
+    target_points: NDArray[np.float64],
+    feat_src_z: NDArray[np.float64],
+    feat_tgt_z: NDArray[np.float64],
+    beta: float,
+) -> tuple[NDArray[np.float64], NDArray[np.float64], float]:
+    """Embed source and target into the joint (position, feature) space.
+
+    Factored out of ``joint_knn`` so that callers needing distances between
+    *specific* pairs — rather than nearest neighbors — measure them in exactly the
+    space the matcher searches, instead of re-deriving the z-scoring and the beta
+    scaling and risking drift. See ``joint_knn`` for why the feature block is
+    scaled by ``beta * sqrt(3 / D)``.
+
+    Args:
+        source_points: (N, 3) source coordinates.
+        target_points: (M, 3) target coordinates.
+        feat_src_z:    (N, D) z-scored source features. D may be 0 for positions only.
+        feat_tgt_z:    (M, D) z-scored target features.
+        beta:          Influence of the whole feature block relative to the whole
+                       position block. beta = 1 weights them equally.
+
+    Returns:
+        Tuple (joint_source, joint_target, pos_std):
+            joint_source: (N, 3+D) embedded source.
+            joint_target: (M, 3+D) embedded target.
+            pos_std:      Scalar the positions were divided by. Multiply a distance
+                          in this space by it to return to physical units; ratios of
+                          two such distances need no correction.
+    """
+    n_dim_pos = source_points.shape[1]
+    n_dim_feat = feat_src_z.shape[1]
+    all_pts = np.vstack([source_points, target_points])
+    pos_mean = all_pts.mean()
+    pos_std = float(all_pts.std() + 1e-8)
+    pos_src_z = (source_points - pos_mean) / pos_std  # (N, 3)
+    pos_tar_z = (target_points - pos_mean) / pos_std  # (M, 3)
+
+    # Equalise the two blocks' contribution to squared distance before applying beta.
+    feat_scale = beta * np.sqrt(n_dim_pos / n_dim_feat) if n_dim_feat else 0.0
+
+    joint_source = np.hstack([pos_src_z, feat_scale * feat_src_z])  # (N, 3+D)
+    joint_target = np.hstack([pos_tar_z, feat_scale * feat_tgt_z])  # (M, 3+D)
+    return joint_source, joint_target, pos_std
+
+
 def joint_knn(
     source_points: NDArray[np.float64],
     target_points: NDArray[np.float64],
@@ -48,19 +95,9 @@ def joint_knn(
         to physical (spatial) units.
     """
     n = len(source_points)
-    n_dim_pos = source_points.shape[1]
-    n_dim_feat = feat_src_z.shape[1]
-    all_pts  = np.vstack([source_points, target_points])
-    pos_mean = all_pts.mean()
-    pos_std  = all_pts.std() + 1e-8
-    pos_src_z = (source_points - pos_mean) / pos_std  # (N, 3)
-    pos_tar_z = (target_points - pos_mean) / pos_std  # (M, 3)
-
-    # Equalise the two blocks' contribution to squared distance before applying beta.
-    feat_scale = beta * np.sqrt(n_dim_pos / n_dim_feat) if n_dim_feat else 0.0
-
-    joint_src = np.hstack([pos_src_z, feat_scale * feat_src_z])  # (N, 3+D)
-    joint_tgt = np.hstack([pos_tar_z, feat_scale * feat_tgt_z])  # (M, 3+D)
+    joint_src, joint_tgt, pos_std = joint_embedding(
+        source_points, target_points, feat_src_z, feat_tgt_z, beta
+    )
     dists, nbr_idx = KDTree(joint_tgt).query(joint_src, k=k)    # joint dist
     dists *= pos_std                                            # rescale to physical units
     return dists.reshape(n, k), nbr_idx.reshape(n, k)
@@ -306,6 +343,52 @@ class GaussianMatcher(Matcher):
             Matching with target_positions (N, 3) as the weighted-average target position
             and weights (N,) as total per-point confidence.
         """
+        w, nbr_idx = self._unnormalized_neighbor_weights(source, target)   # (N, k)
+        row_sums = w.sum(axis=1, keepdims=True)                             # (N, 1)
+        w_norm   = w / row_sums                                             # (N, k)
+
+        target_positions = (w_norm[:, :, None] * target.points[nbr_idx]).sum(axis=1)
+
+        return Matching(
+            source_points=source.points,
+            target_positions=target_positions,
+            weights=row_sums.squeeze(1),
+        )
+
+    def neighbor_weights(
+        self, source: PointCloud, target: PointCloud
+    ) -> tuple[NDArray[np.float64], NDArray[np.intp]]:
+        """How each source point splits its correspondence over its k nearest targets.
+
+        Exposes the distribution that ``match`` averages over, so it can be analysed
+        (e.g. its entropy) with exactly the sigma, k and feature terms the matcher uses.
+
+        Args:
+            source: PointCloud (N, 3).
+            target: PointCloud (M, 3).
+
+        Returns:
+            Tuple (weights, nbr_idx):
+                weights: float (N, k) per-neighbour weights; each row sums to 1.
+                nbr_idx: int (N, k) index into target of each neighbour.
+        """
+        w, nbr_idx = self._unnormalized_neighbor_weights(source, target)
+        return w / w.sum(axis=1, keepdims=True), nbr_idx
+
+    def _unnormalized_neighbor_weights(
+        self, source: PointCloud, target: PointCloud
+    ) -> tuple[NDArray[np.float64], NDArray[np.intp]]:
+        """Select k candidate targets per source point and weight them.
+
+        Args:
+            source: PointCloud (N, 3).
+            target: PointCloud (M, 3).
+
+        Returns:
+            Tuple (weights, nbr_idx):
+                weights: float (N, k) weights scaled so each row's largest is 1.
+                nbr_idx: int (N, k) index into target of each neighbour.
+        """
         k = min(self.k, len(target))
 
         # --- Candidate selection ---
@@ -341,17 +424,5 @@ class GaussianMatcher(Matcher):
             cos_sim   = (feat_src_unit[:, None, :] * feat_nbrs).sum(-1)     # (N, k)
             log_w    += self.alpha * cos_sim
 
-        # --- Softmax normalization and weighted average ---
         log_w -= log_w.max(axis=1, keepdims=True)                           # numerical stability
-        w = np.exp(log_w)                                                    # (N, k)
-
-        row_sums = w.sum(axis=1, keepdims=True)                             # (N, 1)
-        w_norm   = w / row_sums                                             # (N, k)
-
-        target_positions = (w_norm[:, :, None] * target.points[nbr_idx]).sum(axis=1)
-
-        return Matching(
-            source_points=source.points,
-            target_positions=target_positions,
-            weights=row_sums.squeeze(1),
-        )
+        return np.exp(log_w), nbr_idx
