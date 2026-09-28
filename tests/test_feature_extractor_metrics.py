@@ -9,7 +9,7 @@ from error_metrics import (
 )
 from feature_extractor import GeometricFeatureExtractor, RobustGeometricFeatureExtractor
 from point_cloud import PointCloud
-from synthetic import SyntheticExperiment, make_correspondence_pair
+from synthetic import SyntheticExperiment, invert_correspondence, make_correspondence_pair
 
 
 @pytest.fixture
@@ -95,6 +95,42 @@ def test_mutual_nn_fraction_rejects_length_mismatch_without_correspondence(cloud
         mutual_nearest_neighbor_fraction(cloud, PointCloud(cloud.points[:100]))
 
 
+def test_invert_correspondence_round_trips() -> None:
+    """Inverting twice returns the original mapping."""
+    target_to_source = np.array([2, -1, 0, 3], dtype=np.int64)
+    source_to_target = invert_correspondence(target_to_source, n_source=4)
+    np.testing.assert_array_equal(source_to_target, np.array([2, -1, 0, 3]))
+    np.testing.assert_array_equal(
+        invert_correspondence(source_to_target, n_source=4), target_to_source,
+    )
+
+
+def test_invert_correspondence_marks_dropped_sources() -> None:
+    """A source point no target claims must come back as -1, not as a stale index."""
+    inverted = invert_correspondence(np.array([3, 1], dtype=np.int64), n_source=5)
+    np.testing.assert_array_equal(inverted, np.array([-1, 1, -1, 0, -1]))
+
+
+def test_correspondence_pair_noise_perturbs_both_sides_independently() -> None:
+    """Noise must move the clouds apart, or it cannot degrade a descriptor."""
+    experiment = SyntheticExperiment.generate(n=300, t_scale=0.0, style="clustered", seed=0)
+
+    def paired_offsets(noise_std: float) -> np.ndarray:
+        """Distance between each true pair, undoing the target permutation."""
+        p_obs, q_obs, target_to_source = make_correspondence_pair(
+            experiment.P, experiment.P, noise_std=noise_std, rng=np.random.default_rng(0),
+        )
+        matched = target_to_source >= 0
+        return np.linalg.norm(
+            q_obs.points[matched] - p_obs.points[target_to_source[matched]], axis=1,
+        )
+
+    # Without noise the two sides are the same cloud, so every pair coincides exactly.
+    np.testing.assert_allclose(paired_offsets(0.0), 0.0, atol=1e-12)
+    # With noise each side is drawn independently, so pairs separate.
+    assert paired_offsets(0.1).mean() > 0.05
+
+
 def test_features_and_positions_win_in_opposite_regimes() -> None:
     """Positions win while the clouds are close; features win once they are not.
 
@@ -110,9 +146,7 @@ def test_features_and_positions_win_in_opposite_regimes() -> None:
         experiment.P, experiment.P, dropout_prob=0.1, rng=np.random.default_rng(0),
     )
     # make_correspondence_pair maps target -> source; this metric wants source -> target.
-    correspondence = np.full(len(source.points), -1, dtype=np.int64)
-    matched = target_to_source >= 0
-    correspondence[target_to_source[matched]] = np.flatnonzero(matched)
+    correspondence = invert_correspondence(target_to_source, len(source.points))
 
     spacing = float(np.mean(np.linalg.norm(
         source.points - source.points[KDTree(source.points).query(source.points, k=2)[1][:, 1]], axis=1,

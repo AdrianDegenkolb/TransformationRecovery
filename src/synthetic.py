@@ -192,15 +192,22 @@ def make_correspondence_pair(
     p: PointCloud,
     q: PointCloud,
     dropout_prob: float = 0.0,
+    noise_std: float = 0.0,
     rng: np.random.Generator | None = None,
 ) -> tuple[PointCloud, PointCloud, NDArray[np.int64]]:
     """Build a partial, shuffled correspondence pair from an index-aligned cloud pair.
 
     Independently drops points from ``p`` and ``q`` (simulating sensor dropout on
-    each side), then randomly permutes the surviving target points so that
-    correspondence cannot be read off from point order. Yields realistic
-    partial-overlap, order-agnostic correspondence problems with known
-    ground-truth matches.
+    each side), perturbs the survivors with independent Gaussian noise, then randomly
+    permutes the surviving target points so that correspondence cannot be read off
+    from point order. Yields realistic partial-overlap, order-agnostic correspondence
+    problems with known ground-truth matches.
+
+    Applies the same two degradations as ``PointCloudObserver`` but additionally
+    tracks which points survived, which is what makes it usable for the
+    feature-extractor metrics in ``error_metrics``: those need to know which row of
+    one cloud corresponds to which row of the other, and dropout destroys the
+    index alignment a ``PointCloudObserver`` output would otherwise be read with.
 
     Args:
         p:            Source cloud, index-aligned with q (p[i] <-> q[i]), e.g.
@@ -209,16 +216,20 @@ def make_correspondence_pair(
                       SyntheticExperiment's Q.
         dropout_prob: Per-point probability of dropping a point, applied
                       independently to each side.
+        noise_std:    Std of the Gaussian noise added to the surviving points,
+                      drawn independently for each side.
         rng:          Optional random generator for reproducibility.
 
     Returns:
         Tuple (p_obs, q_obs, correspondence):
-            p_obs:          Observed source cloud after dropout.
-            q_obs:          Observed target cloud after dropout and permutation.
+            p_obs:          Observed source cloud after dropout and noise.
+            q_obs:          Observed target cloud after dropout, noise and permutation.
             correspondence: (len(q_obs),) int64 array; correspondence[i] is the
                              index into p_obs.points of the true match for
                              q_obs.points[i], or -1 if that target point's
-                             source correspondent was dropped.
+                             source correspondent was dropped. Note the direction:
+                             target -> source. ``invert_correspondence`` flips it for
+                             consumers that index by source.
     """
     rng = rng or np.random.default_rng()
     n = len(p)
@@ -228,17 +239,47 @@ def make_correspondence_pair(
     keep_p = rng.random(n) >= dropout_prob
     keep_q = rng.random(n) >= dropout_prob
 
-    p_obs = PointCloud(p.points[keep_p])
+    p_points = p.points[keep_p]
     p_obs_index = np.full(n, -1, dtype=np.int64)   # original index -> position in p_obs
     p_obs_index[keep_p] = np.arange(keep_p.sum())
 
     q_kept_original_idx = np.flatnonzero(keep_q)
     q_perm_original_idx = rng.permutation(q_kept_original_idx)
+    q_points = q.points[q_perm_original_idx]
 
-    q_obs = PointCloud(q.points[q_perm_original_idx])
+    if noise_std > 0:
+        p_points = p_points + rng.normal(0.0, noise_std, size=p_points.shape)
+        q_points = q_points + rng.normal(0.0, noise_std, size=q_points.shape)
+
     correspondence = p_obs_index[q_perm_original_idx]
 
-    return p_obs, q_obs, correspondence
+    return PointCloud(p_points), PointCloud(q_points), correspondence
+
+
+def invert_correspondence(
+    correspondence: NDArray[np.int64],
+    n_source: int,
+) -> NDArray[np.int64]:
+    """Flip a target -> source correspondence into a source -> target one.
+
+    ``make_correspondence_pair`` reports, for each target point, which source point
+    it came from. The feature-extractor metrics in ``error_metrics`` index the other
+    way round, by source point. Converting between the two is easy to get subtly
+    wrong, so it lives here rather than being re-derived at each call site.
+
+    Args:
+        correspondence: (M,) index into the source cloud per target point, or -1
+                        where that target point has no counterpart.
+        n_source:       Number of source points, i.e. the length of the result.
+
+    Returns:
+        (n_source,) int64 array giving the target index per source point, or -1
+        where the source point has no counterpart.
+    """
+    inverted = np.full(n_source, -1, dtype=np.int64)
+    matched = correspondence >= 0
+    inverted[correspondence[matched]] = np.flatnonzero(matched)
+    return inverted
 
 
 def _make_cloud(n: int, style: CloudStyle, jitter_std: float = 0.0) -> NDArray[np.float64]:
