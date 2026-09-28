@@ -3,7 +3,14 @@ import pytest
 
 import icp as icp_module
 from algebra_utils import sample_dispersed_rotations, sample_uniform_rotations
-from icp import ICP, MultiStartICP, SigmaAnnealingCallback, _windowed_delta
+from icp import ICP, ICPProgress, MultiStartICP, SigmaAnnealingCallback, _windowed_delta
+
+
+def _progress(iteration: int, residual: float | None = None, delta: float | None = None,
+              spacing: float = 1.0) -> ICPProgress:
+    """Build a progress snapshot for callbacks under test."""
+    return ICPProgress(iteration=iteration, mean_residual=residual, delta=delta,
+                       point_spacing=spacing)
 from point_cloud import PointCloud
 from transformation import RigidTransformation
 
@@ -70,14 +77,14 @@ def test_sigma_annealing_interpolates_from_init_to_final():
     fake_icp = _FakeICP(matcher)
     cb = SigmaAnnealingCallback(sigma_init=4.0, sigma_final=0.5, anneal_steps=5)
 
-    cb.on_iteration_start(0, fake_icp)
+    cb.on_iteration_start(_progress(0), fake_icp)
     assert matcher.sigma == pytest.approx(4.0)
 
-    cb.on_iteration_start(4, fake_icp)
+    cb.on_iteration_start(_progress(4), fake_icp)
     assert matcher.sigma == pytest.approx(0.5)
 
     # Iterations beyond anneal_steps clamp to sigma_final rather than extrapolating.
-    cb.on_iteration_start(100, fake_icp)
+    cb.on_iteration_start(_progress(100), fake_icp)
     assert matcher.sigma == pytest.approx(0.5)
 
 
@@ -91,8 +98,8 @@ def test_sigma_annealing_reads_icp_matcher_at_call_time():
     matcher_b = _FakeMatcher()
     cb = SigmaAnnealingCallback(sigma_init=2.0, sigma_final=1.0, anneal_steps=2)
 
-    cb.on_iteration_start(0, _FakeICP(matcher_a))
-    cb.on_iteration_start(0, _FakeICP(matcher_b))
+    cb.on_iteration_start(_progress(0), _FakeICP(matcher_a))
+    cb.on_iteration_start(_progress(0), _FakeICP(matcher_b))
 
     assert matcher_a.sigma == pytest.approx(2.0)
     assert matcher_b.sigma == pytest.approx(2.0)
@@ -182,3 +189,14 @@ def test_multistart_icp_n_jobs_1_runs_without_process_pool(monkeypatch):
     result = multi.fit(source, target)
     assert len(result.all_results) == 3
     assert len(result.transform_history) == result.n_iterations
+
+
+def test_sigma_at_matches_the_sigma_the_callback_sets():
+    """sigma_at is the schedule used offline (e.g. to recompute per-iteration matchings),
+    so it must agree with what on_iteration_start writes into the matcher."""
+    cb = SigmaAnnealingCallback(sigma_init=4.0, sigma_final=0.5, anneal_steps=5)
+    matcher = _FakeMatcher()
+    for i in [0, 2, 4, 100]:
+        cb.on_iteration_start(_progress(i), _FakeICP(matcher))
+        assert cb.sigma_at(i) == pytest.approx(matcher.sigma)
+    assert cb.sigma_at(2) == pytest.approx(np.sqrt(4.0 * 0.5))   # geometric midpoint

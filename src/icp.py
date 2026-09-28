@@ -19,16 +19,64 @@ from point_cloud import PointCloud
 from transformation import RigidTransformation
 
 
+@dataclass(frozen=True)
+class ICPProgress:
+    """What a callback is told about the run so far, at the start of an iteration.
+
+    A callback that only counts iterations needs nothing but ``iteration``; one that
+    reacts to how the fit is going needs to see it. The per-iteration histories live in
+    local variables inside ``ICP.fit`` rather than on the instance, deliberately — an
+    ICP object is reused across seeds and across MultiStartICP trials, so storing run
+    state on it would leak between runs. Passing a snapshot keeps the instance stateless
+    while still letting a schedule close the loop.
+
+    Attributes:
+        iteration:      Zero-based index of the iteration about to run.
+        mean_residual:  Mean point-to-point residual after the previous M-step. None on
+                        the first iteration, when no M-step has happened yet.
+        delta:          Windowed convergence delta after the previous M-step, i.e. how
+                        far the last few steps moved the transform. None on the first
+                        iteration. Small means the fit has stopped travelling, which is
+                        not the same as being correct.
+        point_spacing:  Median nearest-neighbour distance of the source cloud. Constant
+                        for a run, supplied so a schedule can judge a residual against
+                        the scale of the data rather than against an absolute number.
+        match_uniqueness: Fraction of the previous E-step's correspondences that landed
+                        on distinct target points. A correct alignment pairs points
+                        roughly one-to-one and scores near 1; a wrong one collapses many
+                        source points onto the same few targets and scores low. Unlike
+                        the residual it says something about correspondence *quality*
+                        rather than distance, and needs no ground truth. None on the
+                        first iteration, and meaningless for soft matching, whose target
+                        positions are weighted averages rather than actual points.
+    """
+
+    iteration: int
+    mean_residual: float | None
+    delta: float | None
+    point_spacing: float
+    match_uniqueness: float | None = None
+
+
 class ICPCallback(ABC):
     """Base class for hooks called at each ICP iteration."""
 
+    def reset(self) -> None:
+        """Discard any state carried over from a previous run.
+
+        Called by ``ICP.fit`` before the first iteration. A callback instance is reused
+        across seeds and across MultiStartICP trials, so a schedule that remembers
+        anything — a monotone clamp, a phase switch — would otherwise start run *n+1*
+        wherever run *n* finished. Stateless callbacks need not override this.
+        """
+
     @abstractmethod
-    def on_iteration_start(self, iteration: int, icp: ICP) -> None:
+    def on_iteration_start(self, progress: ICPProgress, icp: ICP) -> None:
         """Called at the start of each iteration, before the E-step.
 
         Args:
-            iteration: Zero-based iteration index.
-            icp:       The running ICP instance (access icp.matcher to update it).
+            progress: Snapshot of the run so far; see ICPProgress.
+            icp:      The running ICP instance (access icp.matcher to update it).
         """
         ...
 
@@ -60,23 +108,412 @@ class SigmaAnnealingCallback(ICPCallback):
         self.sigma_final = sigma_final
         self.anneal_steps = anneal_steps
 
-    def on_iteration_start(self, iteration: int, icp: ICP) -> None:
+    def sigma_at(self, iteration: int) -> float:
+        """Bandwidth the schedule assigns to a given iteration.
+
+        Args:
+            iteration: Zero-based ICP iteration index.
+
+        Returns:
+            sigma_init at iteration 0, decaying geometrically to sigma_final at
+            anneal_steps - 1 and held there afterwards.
+        """
+        t = min(iteration, self.anneal_steps - 1) / max(self.anneal_steps - 1, 1)
+        return float(self.sigma_init * (self.sigma_final / self.sigma_init) ** t)
+
+    def on_iteration_start(self, progress: ICPProgress, icp: ICP) -> None:
         """Update icp.matcher.sigma for the current iteration.
 
         Args:
-            iteration: Zero-based iteration index.
-            icp:       The running ICP instance; its matcher must be a GaussianMatcher.
+            progress: Snapshot of the run so far; only the iteration index is used.
+            icp:      The running ICP instance; its matcher must be a GaussianMatcher.
         """
-        t = min(iteration, self.anneal_steps - 1) / max(self.anneal_steps - 1, 1)
         if hasattr(icp.matcher, "sigma"):
-            icp.matcher.sigma = float(
-                self.sigma_init * (self.sigma_final / self.sigma_init) ** t
-            )
+            icp.matcher.sigma = self.sigma_at(progress.iteration)
         else:
             raise AttributeError(
                 f"ICP matcher {type(icp.matcher).__name__} has no attribute 'sigma'; "
                 "SigmaAnnealingCallback requires a matcher with a 'sigma' attribute."
             )
+
+
+class BetaAnnealingCallback(ICPCallback):
+    """Varies the feature weight ``beta`` over an ICP run.
+
+    Notebook 4.2 measured two opposing pulls on ``beta``, the influence of the feature
+    block relative to position in append-mode matching:
+
+    - the **more misaligned** the clouds, the higher it should be, because position
+      carries no usable signal until they roughly overlap (optimum 0 at 0 degrees,
+      >= 8 at 150);
+    - the **more degraded** the observation, the lower it should be, because a
+      perturbed descriptor given full authority locks in wrong correspondences with no
+      position signal left to overrule it (optimum 5 when clean, 0.25 when severe).
+
+    Degradation is a property of the data and fixed for a run, so it sets a ceiling.
+    Misalignment shrinks as ICP converges, so the right value *moves* underneath that
+    ceiling — which no constant can follow. Subclasses differ only in what they use to
+    decide where along that path the run currently is.
+
+    The schedule is clamped to be non-increasing. Every closed-loop variant risks a
+    latch — a high beta produces bad correspondences, which keeps the residual high,
+    which keeps beta high — and forbidding increases removes that failure mode at the
+    cost of never recovering from an overshoot.
+    """
+
+    def __init__(self, beta_start: float, beta_end: float) -> None:
+        """
+        Args:
+            beta_start: Feature weight at the start of a run, when the clouds are still
+                        misaligned. Bounded above by descriptor quality, not by the
+                        misalignment: overshooting collapses reliability under
+                        degradation far more sharply than undershooting does.
+            beta_end:   Feature weight once the fit has converged. 0.0 hands the endgame
+                        entirely to positions, which is optimal at perfect alignment.
+
+        Raises:
+            ValueError: If beta_end exceeds beta_start, which would invert the schedule.
+        """
+        if beta_end > beta_start:
+            raise ValueError(
+                f"beta must anneal downward: got start={beta_start}, end={beta_end}."
+            )
+        self.beta_start = beta_start
+        self.beta_end = beta_end
+        self._last = beta_start
+
+    def _blend(self, t: float) -> float:
+        """Interpolate between the endpoints, with t = 0 at the start and 1 at the end.
+
+        Args:
+            t: Progress along the schedule, clamped to [0, 1].
+
+        Returns:
+            The interpolated feature weight. Geometric between two positive endpoints,
+            linear when the endpoint is 0, which a geometric curve cannot reach.
+        """
+        t = min(max(t, 0.0), 1.0)
+        if self.beta_end <= 0.0:
+            return self.beta_start * (1.0 - t)
+        return self.beta_start * (self.beta_end / self.beta_start) ** t
+
+    @abstractmethod
+    def _target_beta(self, progress: ICPProgress) -> float:
+        """Feature weight this schedule wants for the coming iteration.
+
+        Args:
+            progress: Snapshot of the run so far.
+
+        Returns:
+            The unclamped target; the caller enforces monotonicity.
+        """
+        ...
+
+    def on_iteration_start(self, progress: ICPProgress, icp: ICP) -> None:
+        """Set icp.matcher.beta for the coming iteration.
+
+        Args:
+            progress: Snapshot of the run so far.
+            icp:      The running ICP instance; its matcher must accept a beta.
+
+        Raises:
+            AttributeError: If the matcher has no 'beta' attribute, i.e. it is not
+                            doing append-mode feature matching.
+        """
+        if not hasattr(icp.matcher, "beta"):
+            raise AttributeError(
+                f"ICP matcher {type(icp.matcher).__name__} has no attribute 'beta'; "
+                "beta annealing requires a matcher using append-mode features."
+            )
+        self._last = min(self._last, self._target_beta(progress))
+        icp.matcher.beta = float(self._last)
+
+    def reset(self) -> None:
+        """Rewind to the start value so the schedule can be reused for another run."""
+        self._last = self.beta_start
+
+
+class IterationBetaAnnealing(BetaAnnealingCallback):
+    """Geometric decay of beta over a fixed number of iterations.
+
+    Open-loop: it never looks at how the fit is going, and simply assumes misalignment
+    shrinks monotonically with iteration count. That assumption is exactly what makes it
+    safe — there is no feedback path, so it cannot latch — and exactly what makes it
+    blunt, since a run that converges early spends its remaining iterations at a beta
+    lower than it needed and a run that stalls gets no extra help. It mirrors
+    ``SigmaAnnealingCallback`` and is the baseline the closed-loop schedules must beat.
+    """
+
+    def __init__(self, beta_start: float, beta_end: float, anneal_steps: int) -> None:
+        """
+        Args:
+            beta_start:   Feature weight at iteration 0.
+            beta_end:     Feature weight at and after ``anneal_steps``.
+            anneal_steps: Iterations to decay over, typically ICP's max_iter.
+        """
+        super().__init__(beta_start, beta_end)
+        self.anneal_steps = anneal_steps
+
+    def _target_beta(self, progress: ICPProgress) -> float:
+        """Interpolate geometrically between the endpoints by iteration index.
+
+        Args:
+            progress: Snapshot of the run so far; only the iteration is used.
+
+        Returns:
+            The scheduled feature weight.
+        """
+        return self._blend(
+            min(progress.iteration, self.anneal_steps - 1) / max(self.anneal_steps - 1, 1)
+        )
+
+
+class ResidualBetaAnnealing(BetaAnnealingCallback):
+    """Sets beta from how far the fit still is from the data's own scale.
+
+    Closed-loop. The residual is the only misalignment signal available at runtime, but
+    it is ambiguous on its own: a large value can mean the clouds are far apart *or*
+    that the observation is noisy, and those call for opposite changes to beta. Dividing
+    by the cloud's median point spacing removes the part of that ambiguity which comes
+    from units — a residual of 5 means nothing, a residual of five point spacings means
+    the clouds are unambiguously misaligned, while anything at or below one spacing is
+    within the range noise alone could explain.
+
+    Above ``start_spacings`` the run is treated as misaligned and gets ``beta_start``;
+    below ``end_spacings`` as converged and gets ``beta_end``; in between it interpolates
+    geometrically.
+    """
+
+    def __init__(
+        self,
+        beta_start: float,
+        beta_end: float,
+        start_spacings: float = 5.0,
+        end_spacings: float = 1.0,
+    ) -> None:
+        """
+        Args:
+            beta_start:     Feature weight while the residual exceeds start_spacings.
+            beta_end:       Feature weight once it falls below end_spacings.
+            start_spacings: Residual, in point spacings, at or above which the clouds
+                            count as fully misaligned.
+            end_spacings:   Residual, in point spacings, at or below which they count as
+                            aligned. One spacing is the natural floor: below it, points
+                            are closer to their neighbours than the grid is wide.
+
+        Raises:
+            ValueError: If the thresholds are not ordered, or point spacing is unusable.
+        """
+        super().__init__(beta_start, beta_end)
+        if end_spacings >= start_spacings:
+            raise ValueError(
+                f"start_spacings must exceed end_spacings, got {start_spacings} "
+                f"and {end_spacings}."
+            )
+        self.start_spacings = start_spacings
+        self.end_spacings = end_spacings
+
+    def _target_beta(self, progress: ICPProgress) -> float:
+        """Map the scale-normalised residual onto the beta range.
+
+        Args:
+            progress: Snapshot of the run so far.
+
+        Returns:
+            The scheduled feature weight; beta_start until a residual is available.
+        """
+        if progress.mean_residual is None or progress.point_spacing <= 0.0:
+            return self.beta_start
+        spacings = progress.mean_residual / progress.point_spacing
+        if spacings >= self.start_spacings:
+            return self.beta_start
+        if spacings <= self.end_spacings:
+            return self.beta_end
+        return self._blend((self.start_spacings - spacings)
+                           / (self.start_spacings - self.end_spacings))
+
+
+class TwoPhaseBetaAnnealing(BetaAnnealingCallback):
+    """Holds beta high until the fit stops moving, then drops it to refine.
+
+    Not an anneal at all but a switch, and included as the baseline a smooth schedule
+    has to justify itself against. Notebook 4.2's measurement is compatible with most of
+    the benefit coming from just two regimes — search, then refine — in which case a
+    graded schedule is complexity without payoff.
+
+    The switch fires on ICP's own windowed convergence delta rather than on the residual.
+    That is the more honest trigger for "has the search finished": delta measures how far
+    the last few steps actually moved the transform, so it distinguishes a run that has
+    stopped travelling from one that merely has a large residual because the data is
+    noisy.
+    """
+
+    def __init__(self, beta_start: float, beta_end: float, stall_delta: float = 1e-3) -> None:
+        """
+        Args:
+            beta_start:  Feature weight during the search phase.
+            beta_end:    Feature weight after the switch.
+            stall_delta: Windowed delta below which the search counts as finished. Well
+                         above ICP's own convergence tol, since the point is to switch
+                         *before* the run would otherwise stop.
+        """
+        super().__init__(beta_start, beta_end)
+        self.stall_delta = stall_delta
+        self.switched_at: int | None = None
+
+    def _target_beta(self, progress: ICPProgress) -> float:
+        """Return the search weight until the transform stalls, then the refine weight.
+
+        Args:
+            progress: Snapshot of the run so far.
+
+        Returns:
+            The scheduled feature weight.
+        """
+        if self.switched_at is None:
+            if progress.delta is not None and progress.delta < self.stall_delta:
+                self.switched_at = progress.iteration
+            else:
+                return self.beta_start
+        return self.beta_end
+
+    def reset(self) -> None:
+        """Rewind the schedule and forget the recorded switch point."""
+        super().reset()
+        self.switched_at = None
+
+
+class DeltaBetaAnnealing(BetaAnnealingCallback):
+    """Sets beta from how much the transform is still moving, relative to its own peak.
+
+    Closed-loop on ICP's windowed delta — the distance from the identity of the last ten
+    steps composed. That asks "is the fit still travelling", which is a different and
+    cleaner question than the residual's "is the fit far off": noise jitters the
+    transform slightly, whereas genuine misalignment moves it a long way, so delta is far
+    less confounded by the noise level than a residual is.
+
+    The threshold is a fraction of the largest delta seen in this run rather than an
+    absolute number, because delta carries units — it sums a dimensionless rotation term
+    and a translation in cloud units, so any fixed cutoff would mean something different
+    on every cloud. Self-normalising sidesteps that entirely.
+
+    One artifact to be aware of: ``_windowed_delta`` compares against the transform from
+    ten steps ago, or against the run's start when fewer than ten have elapsed. For the
+    first ten iterations it therefore measures displacement from the origin, not recent
+    motion, and reads large regardless. That is harmless here — it keeps beta at its
+    start value through exactly the early iterations where the search is happening.
+    """
+
+    def __init__(self, beta_start: float, beta_end: float, end_fraction: float = 0.05) -> None:
+        """
+        Args:
+            beta_start:   Feature weight while the transform is still moving freely.
+            beta_end:     Feature weight once motion has all but stopped.
+            end_fraction: Fraction of this run's peak delta at or below which the search
+                          counts as finished.
+
+        Raises:
+            ValueError: If end_fraction is not in (0, 1].
+        """
+        super().__init__(beta_start, beta_end)
+        if not 0.0 < end_fraction <= 1.0:
+            raise ValueError(f"end_fraction must lie in (0, 1], got {end_fraction}.")
+        self.end_fraction = end_fraction
+        self._peak_delta = 0.0
+
+    def _target_beta(self, progress: ICPProgress) -> float:
+        """Map the delta, as a fraction of its peak, onto the beta range.
+
+        Args:
+            progress: Snapshot of the run so far.
+
+        Returns:
+            The scheduled feature weight; beta_start until a delta is available.
+        """
+        if progress.delta is None:
+            return self.beta_start
+        self._peak_delta = max(self._peak_delta, progress.delta)
+        if self._peak_delta <= 0.0:
+            return self.beta_end
+        fraction = progress.delta / self._peak_delta
+        if fraction <= self.end_fraction:
+            return self.beta_end
+        # Log-spaced, because delta falls by orders of magnitude rather than linearly.
+        span = np.log(1.0) - np.log(self.end_fraction)
+        return self._blend((np.log(1.0) - np.log(fraction)) / span)
+
+    def reset(self) -> None:
+        """Rewind the schedule and forget the peak delta of the previous run."""
+        super().reset()
+        self._peak_delta = 0.0
+
+
+class ConsistencyBetaAnnealing(BetaAnnealingCallback):
+    """Sets beta from how one-to-one the current correspondences are.
+
+    Closed-loop on correspondence *quality* rather than on distance. A correct alignment
+    pairs points roughly one-to-one, so almost every source point claims a different
+    target; a wrong one collapses many source points onto the same few targets, because
+    nearest-neighbour matching sends whole regions to whichever handful of points happens
+    to lie nearest. The fraction of distinct targets therefore tracks whether the
+    correspondences are trustworthy — which is what beta should respond to — and needs no
+    ground truth to compute.
+
+    It is the only signal here that is not a proxy for distance. Both the residual and
+    the delta answer geometric questions and leave "are these correspondences any good"
+    to be inferred; this measures it.
+
+    Only meaningful with hard matching. A soft matcher's target positions are weighted
+    averages of several neighbours, so they are distinct almost by construction and the
+    fraction carries no information.
+    """
+
+    def __init__(
+        self,
+        beta_start: float,
+        beta_end: float,
+        start_uniqueness: float = 0.5,
+        end_uniqueness: float = 0.9,
+    ) -> None:
+        """
+        Args:
+            beta_start:       Feature weight while correspondences are still degenerate.
+            beta_end:         Feature weight once they are near one-to-one.
+            start_uniqueness: Distinct-target fraction at or below which the run counts
+                              as still searching.
+            end_uniqueness:   Distinct-target fraction at or above which it counts as
+                              converged.
+
+        Raises:
+            ValueError: If the thresholds are not ordered.
+        """
+        super().__init__(beta_start, beta_end)
+        if end_uniqueness <= start_uniqueness:
+            raise ValueError(
+                f"end_uniqueness must exceed start_uniqueness, got {end_uniqueness} "
+                f"and {start_uniqueness}."
+            )
+        self.start_uniqueness = start_uniqueness
+        self.end_uniqueness = end_uniqueness
+
+    def _target_beta(self, progress: ICPProgress) -> float:
+        """Map the distinct-target fraction onto the beta range.
+
+        Args:
+            progress: Snapshot of the run so far.
+
+        Returns:
+            The scheduled feature weight; beta_start until a matching has happened.
+        """
+        if progress.match_uniqueness is None:
+            return self.beta_start
+        uniqueness = progress.match_uniqueness
+        if uniqueness <= self.start_uniqueness:
+            return self.beta_start
+        if uniqueness >= self.end_uniqueness:
+            return self.beta_end
+        return self._blend((uniqueness - self.start_uniqueness)
+                           / (self.end_uniqueness - self.start_uniqueness))
 
 
 @dataclass
@@ -272,11 +709,23 @@ class ICP:
         # if the matcher is invariant to transformations.
         self.matcher.prepare(source, target)
 
+        point_spacing = source.median_spacing if self.callbacks else 0.0
+        match_uniqueness: float | None = None
+        for cb in self.callbacks:
+            cb.reset()
         t0 = time.perf_counter()
         pbar = tqdm(range(self.max_iter), desc="ICP", disable=not self.verbose)
         for i in pbar:
-            for cb in self.callbacks:
-                cb.on_iteration_start(i, self)
+            if self.callbacks:
+                progress = ICPProgress(
+                    iteration=i,
+                    mean_residual=mean_residuals[-1] if mean_residuals else None,
+                    delta=deltas[-1] if deltas else None,
+                    point_spacing=point_spacing,
+                    match_uniqueness=match_uniqueness,
+                )
+                for cb in self.callbacks:
+                    cb.on_iteration_start(progress, self)
 
             # E step: find correspondences between the current source and target clouds
             matching = self.matcher.match(current, target)
@@ -292,6 +741,12 @@ class ICP:
             if self.record_history:
                 cloud_history.append(current)
                 matching_history.append(matching)
+            if self.callbacks:
+                # Distinct targets claimed, as a fraction of source points. Cheap: no
+                # extra matching, just a uniqueness count over the positions already
+                # returned by the E-step.
+                distinct = len(np.unique(matching.target_positions, axis=0))
+                match_uniqueness = distinct / max(len(matching.target_positions), 1)
             mean_residuals.append(residual)
             transform_history.append(accumulated)
             deltas.append(delta)
