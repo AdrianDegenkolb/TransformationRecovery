@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from experiment_runner import MultiSeedSyntheticICPResult, _quiet, fit_multi_seed
+from experiment_runner import MultiSeedSyntheticICPResult, quiet, fit_multi_seed
 from icp import ICP, ICPResult, MultiStartICP
 from synthetic import PointCloudObserver, SyntheticExperiment
 from transformation import RigidTransformation
@@ -53,7 +53,7 @@ def test_mean_closest_point_residuals_reuses_cached_residuals():
 
 def test_quiet_restores_verbose_after_normal_exit():
     icp = ICP(verbose=True)
-    with _quiet(icp):
+    with quiet(icp):
         assert icp.verbose is False
     assert icp.verbose is True
 
@@ -61,7 +61,7 @@ def test_quiet_restores_verbose_after_normal_exit():
 def test_quiet_restores_verbose_after_exception():
     icp = ICP(verbose=True)
     with pytest.raises(RuntimeError):
-        with _quiet(icp):
+        with quiet(icp):
             assert icp.verbose is False
             raise RuntimeError("boom")
     assert icp.verbose is True
@@ -70,7 +70,7 @@ def test_quiet_restores_verbose_after_exception():
 def test_quiet_also_silences_wrapped_icp_for_multistart():
     inner = ICP(verbose=True)
     multi = MultiStartICP(icp=inner, verbose=True)
-    with _quiet(multi):
+    with quiet(multi):
         assert multi.verbose is False
         assert inner.verbose is False
     assert multi.verbose is True

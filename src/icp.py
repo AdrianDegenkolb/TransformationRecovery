@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from contextlib import contextmanager
+from collections.abc import Generator
 from numpy.typing import NDArray
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -946,3 +947,24 @@ class MultiStartICP:
         result.transformation = result.transformation.compose(init_tf)
         result.transform_history = [T.compose(init_tf) for T in result.transform_history]
         return result, R_init
+
+@contextmanager
+def quiet(icp: ICP | MultiStartICP) -> Generator[None, None, None]:
+    """Temporarily disable progress bars on `icp` for the duration of the block.
+
+    For a `MultiStartICP`, also silences the wrapped per-start `ICP` instance
+    (`icp.icp`), since it has its own independent `verbose` flag. Restores the
+    original value(s) even if the block raises.
+
+    Args:
+        icp: ICP or MultiStartICP instance to silence.
+    """
+    targets = [icp, icp.icp] if isinstance(icp, MultiStartICP) else [icp]
+    originals = [t.verbose for t in targets]
+    for t in targets:
+        t.verbose = False
+    try:
+        yield
+    finally:
+        for t, original in zip(targets, originals):
+            t.verbose = original

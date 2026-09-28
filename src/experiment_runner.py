@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import cached_property
 from typing import Any
@@ -16,7 +14,7 @@ from tqdm import tqdm
 
 from algebra_utils import rotation_angle
 from error_metrics import convergence_to_global_opt_ratio, nearest_neighbor_residuals, true_residuals as compute_true_residuals
-from icp import ICP, ICPResult, MultiStartICP, MultiStartICPResult
+from icp import ICP, ICPResult, MultiStartICP, MultiStartICPResult, quiet
 from synthetic import PerfectObserver, PointCloudObserver, SyntheticExperiment
 from transformation import RigidTransformation
 from trimmer import Trimmer
@@ -139,28 +137,6 @@ class MultiSeedSyntheticICPResult:
         return [res.deltas for res in self.results]
 
 
-@contextmanager
-def _quiet(icp: ICP | MultiStartICP) -> Generator[None, None, None]:
-    """Temporarily disable progress bars on `icp` for the duration of the block.
-
-    For a `MultiStartICP`, also silences the wrapped per-start `ICP` instance
-    (`icp.icp`), since it has its own independent `verbose` flag. Restores the
-    original value(s) even if the block raises.
-
-    Args:
-        icp: ICP or MultiStartICP instance to silence.
-    """
-    targets = [icp, icp.icp] if isinstance(icp, MultiStartICP) else [icp]
-    originals = [t.verbose for t in targets]
-    for t in targets:
-        t.verbose = False
-    try:
-        yield
-    finally:
-        for t, original in zip(targets, originals):
-            t.verbose = original
-
-
 def _fit_one_seed(
     icp: ICP | MultiStartICP,
     seed: int,
@@ -212,7 +188,7 @@ def fit_multi_seed(
     """
     experiment_kwargs = experiment_kwargs or {}
 
-    with _quiet(icp):
+    with quiet(icp):
         if n_jobs == 1:
             results: dict[int, tuple[SyntheticExperiment, ICPResult | MultiStartICPResult]] = {}
             pbar = tqdm(seeds, desc=f"Solving {len(seeds)} seeds", disable=not verbose)
