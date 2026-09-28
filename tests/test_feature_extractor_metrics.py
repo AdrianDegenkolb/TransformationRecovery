@@ -7,7 +7,7 @@ from error_metrics import (
     feature_correspondence_correlation,
     mutual_nearest_neighbor_fraction,
 )
-from feature_extractor import RobustGeometricFeatureExtractor
+from feature_extractor import GeometricFeatureExtractor, RobustGeometricFeatureExtractor
 from point_cloud import PointCloud
 from synthetic import SyntheticExperiment, make_correspondence_pair
 
@@ -128,3 +128,22 @@ def test_features_and_positions_win_in_opposite_regimes() -> None:
 
     assert fraction(0.1, 0.0, False) > fraction(0.1, 3.0, True), "Positions should win when nearly aligned."
     assert fraction(2.0, 3.0, True) > fraction(2.0, 0.0, False), "Features should win once misaligned."
+
+
+def test_feature_names_match_output_width() -> None:
+    """A name per column, or the per-dimension diagnostic mislabels its rows."""
+    cloud = PointCloud(np.random.default_rng(0).uniform(-10, 10, size=(100, 3)))
+    for extractor in (GeometricFeatureExtractor(k=10), RobustGeometricFeatureExtractor(k=10)):
+        names = extractor.feature_names
+        assert len(names) == extractor.target_dim
+        assert len(names) == extractor.get_features(cloud).shape[1]
+        assert len(set(names)) == len(names), "names must be unique to label a table"
+
+
+def test_robust_feature_names_track_quantiles() -> None:
+    """Names are derived from the configured levels, not hard-coded to the default."""
+    extractor = RobustGeometricFeatureExtractor(k=10, quantiles=(0.1, 0.9))
+    names = extractor.feature_names
+    assert len(names) == extractor.target_dim == 7
+    assert names[:2] == ["dist_q10%", "dist_q90%"]
+    assert names[-2:] == ["angle_q10%", "angle_q90%"]

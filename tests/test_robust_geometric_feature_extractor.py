@@ -9,7 +9,7 @@ from feature_extractor import (
 )
 
 
-N_FEATURES = 11  # 3 dist quantiles + centroid_offset + 4 eigen ratios + 3 angle quantiles
+N_FEATURES = 9  # 3 dist quantiles + centroid_offset + 2 eigen ratios + 3 angle quantiles
 
 
 @pytest.fixture
@@ -19,16 +19,16 @@ def cloud() -> PointCloud:
 
 
 def test_output_shape_and_dtype(cloud: PointCloud) -> None:
-    """get_features returns (N, 11) float64 for the default 3 quantile levels."""
+    """get_features returns (N, 9) float64 for the default 3 quantile levels."""
     feats = RobustGeometricFeatureExtractor(k=10).get_features(cloud)
     assert feats.shape == (len(cloud.points), N_FEATURES)
     assert feats.dtype == np.float64
 
 
 def test_output_shape_follows_quantile_count(cloud: PointCloud) -> None:
-    """Feature dimension is 5 + 2 * len(quantiles)."""
+    """Feature dimension is 3 + 2 * len(quantiles)."""
     feats = RobustGeometricFeatureExtractor(k=10, quantiles=(0.5,)).get_features(cloud)
-    assert feats.shape == (len(cloud.points), 7)
+    assert feats.shape == (len(cloud.points), 5)
 
 
 @pytest.mark.parametrize("quantiles", [(0.5,), (0.25, 0.5, 0.75), tuple(np.linspace(0.1, 0.9, 8))])
@@ -96,7 +96,7 @@ def test_scale_invariance(cloud: PointCloud) -> None:
 
 
 def test_k_clamped_to_n_minus_one() -> None:
-    """k larger than N-1 must not raise; features are still (N, 11)."""
+    """k larger than N-1 must not raise; features are still (N, 9)."""
     small = PointCloud(np.eye(5, 3))
     feats = RobustGeometricFeatureExtractor(k=100).get_features(small)
     assert feats.shape == (5, N_FEATURES)
@@ -226,7 +226,7 @@ def test_sampled_angle_quantiles_converge_to_exhaustive_ones() -> None:
     rng = np.random.default_rng(6)
     points = PointCloud(rng.uniform(-10, 10, size=(400, 3)))
     k, n_q = 60, 3
-    angle_cols = slice(n_q + 5, n_q + 5 + n_q)
+    angle_cols = slice(n_q + 3, n_q + 3 + n_q)
 
     def angle_quantiles(n_pairs: int) -> np.ndarray:
         ext = RobustGeometricFeatureExtractor(k=k, n_angle_pairs=n_pairs)

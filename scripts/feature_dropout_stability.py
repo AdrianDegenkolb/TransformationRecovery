@@ -57,13 +57,9 @@ def robust_feature_names(quantiles: tuple[float, ...]) -> list[str]:
         quantiles: Quantile levels the extractor was configured with.
 
     Returns:
-        List of 2 * len(quantiles) + 5 column names.
+        One column name per feature, delegated to the extractor itself.
     """
-    return (
-        [f"dist_q{int(q * 100):02d}" for q in quantiles]
-        + ["centroid_offset", "linearity", "planarity", "sphericity", "anisotropy"]
-        + [f"angle_q{int(q * 100):02d}" for q in quantiles]
-    )
+    return RobustGeometricFeatureExtractor(quantiles=tuple(quantiles)).feature_names
 
 
 def _noise_feature_pairs(

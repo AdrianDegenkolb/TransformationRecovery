@@ -131,6 +131,24 @@ class FeatureExtractor(ABC):
     is_transformation_invariant: bool
     target_dim: int
 
+    @property
+    def feature_names(self) -> list[str]:
+        """One human-readable name per output dimension, in column order.
+
+        Exists so that a per-dimension diagnostic — ``feature_correspondence_correlation``
+        scores each dimension separately — can say *which* feature degraded rather than
+        just reporting an index. The names live with the extractor because only it knows
+        its own column order, and that order is easy to get wrong from the outside.
+
+        Returns:
+            A list of length ``target_dim``, aligned with the columns of
+            ``get_features``. The default is positional and carries no meaning;
+            extractors whose dimensions are individually interpretable override it.
+            Extractors with a data-dependent width (``target_dim < 0``) return an
+            empty list, since their columns have no fixed identity.
+        """
+        return [f"dim_{i}" for i in range(max(self.target_dim, 0))]
+
     @abstractmethod
     def get_features(self, p: PointCloud) -> NDArray[np.float64]:
         """Compute a feature vector for each point in the cloud.
@@ -149,7 +167,7 @@ class FeatureExtractor(ABC):
 
 
 class GeometricFeatureExtractor(FeatureExtractor):
-    """Similarity-invariant geometric feature extractor (9-dimensional).
+    """Similarity-invariant geometric feature extractor (7-dimensional).
 
     For each point p with k nearest neighbors at distances d_1 ≤ ... ≤ d_k:
 
@@ -157,11 +175,23 @@ class GeometricFeatureExtractor(FeatureExtractor):
     - std(d) / d_bar       — coefficient of variation (regularity)
     - ||p - centroid|| / d_bar — normalized centroid offset (eccentricity)
     - linearity            — (λ1 - λ2) / λ1
-    - planarity            — (λ2 - λ3) / λ1
     - sphericity           — λ3 / λ1
-    - anisotropy           — (λ1 - λ3) / λ1
     - mean pairwise angle  — mean of angles between neighbor direction vectors
     - std pairwise angle   — std of angles between neighbor direction vectors
+
+    Only two eigenvalue-ratio shape features are emitted, not the usual four. The
+    standard set {linearity, planarity, sphericity, anisotropy} has rank 2, because
+    two exact identities hold for every point:
+
+        anisotropy = 1 - sphericity
+        planarity  = 1 - linearity - sphericity
+
+    Emitting all four therefore adds no information while letting shape dominate the
+    descriptor: consumers z-score each dimension and weight them equally (see
+    ``matcher.joint_knn``), so four columns spanning a 2D subspace give local shape
+    twice the influence it should have over every distance. Any two of the four span
+    that subspace; linearity and sphericity are kept because both are measurably the
+    most perturbation-tolerant of the four.
 
     All features are ratios or angles derived from local k-NN geometry and are
     invariant under similarity transformations (rotation, translation, uniform scale).
@@ -169,7 +199,7 @@ class GeometricFeatureExtractor(FeatureExtractor):
     """
 
     is_transformation_invariant: bool = True
-    target_dim: int = 9
+    target_dim: int = 7
 
     def __init__(self, k: int = 20, n_angle_pairs: int = 2000) -> None:
         """
@@ -184,14 +214,27 @@ class GeometricFeatureExtractor(FeatureExtractor):
         self.k = k
         self.n_angle_pairs = n_angle_pairs
 
+    @property
+    def feature_names(self) -> list[str]:
+        """Name per output dimension, matching the hstack order in ``get_features``.
+
+        Returns:
+            The seven dimension names, in column order.
+        """
+        return [
+            "dist_min", "dist_cv", "centroid_offset",
+            "linearity", "sphericity",
+            "angle_mean", "angle_std",
+        ]
+
     def get_features(self, p: PointCloud) -> NDArray[np.float64]:
-        """Compute 9-dimensional geometric feature vectors for all points.
+        """Compute 7-dimensional geometric feature vectors for all points.
 
         Args:
             p: Input point cloud with N points (N >= 2).
 
         Returns:
-            Float64 array of shape (N, 9).
+            Float64 array of shape (N, 7).
         """
         points = p.points                                                   # (N, 3)
         n = len(points)
@@ -222,10 +265,10 @@ class GeometricFeatureExtractor(FeatureExtractor):
         lam3 = eigvals[:, 0:1]                                              # (N, 1) smallest
         l1 = np.maximum(lam1, eps)
 
+        # Two of the four standard shape ratios. planarity and anisotropy are exact
+        # functions of these two (see the class docstring) and are omitted on purpose.
         linearity  = (lam1 - lam2) / l1                                     # (N, 1)
-        planarity  = (lam2 - lam3) / l1                                     # (N, 1)
         sphericity = lam3 / l1                                              # (N, 1)
-        anisotropy = (lam1 - lam3) / l1                                     # (N, 1)
 
         # --- Pairwise angles between neighbor direction vectors ---
         # Only the sampled pairs are evaluated, bounding this at O(n_angle_pairs)
@@ -244,15 +287,15 @@ class GeometricFeatureExtractor(FeatureExtractor):
 
         return np.hstack([
             feat_d_min, feat_cv, centroid_offset,
-            linearity, planarity, sphericity, anisotropy,
+            linearity, sphericity,
             ang_mean, ang_std,
-        ]).astype(np.float64)                                               # (N, 9)
+        ]).astype(np.float64)                                               # (N, 7)
 
 
 class RobustGeometricFeatureExtractor(FeatureExtractor):
     """Similarity-invariant geometric feature extractor robust to point dropout.
 
-    Produces ``2 * len(quantiles) + 5`` features per point (11 with the default
+    Produces ``2 * len(quantiles) + 3`` features per point (9 with the default
     three quantile levels).
 
     Refines GeometricFeatureExtractor in three ways, all aimed at keeping feature
@@ -271,7 +314,7 @@ class RobustGeometricFeatureExtractor(FeatureExtractor):
       invariant to the single global similarity transform being recovered,
       while preserving relative density differences between distinct regions
       of the same cloud as a discriminative signal.
-    - The PCA covariance used for linearity/planarity/sphericity/anisotropy is
+    - The PCA covariance used for linearity/sphericity is
       computed about the neighbor centroid rather than about the query point,
       so these features describe pure local shape instead of being mixed with
       the point's offset within its own neighborhood (already captured
@@ -283,9 +326,7 @@ class RobustGeometricFeatureExtractor(FeatureExtractor):
     - dist quantiles (Q25, Q50, Q75 by default) — d_i / scale
     - centroid_offset       — ||p - neighbor_centroid|| / scale
     - linearity             — (λ1 - λ2) / λ1
-    - planarity             — (λ2 - λ3) / λ1
     - sphericity            — λ3 / λ1
-    - anisotropy            — (λ1 - λ3) / λ1
     - angle quantiles (Q25, Q50, Q75 by default) — pairwise neighbor-direction angles
 
     where scale is the median, over all points in the cloud, of each point's
@@ -330,8 +371,25 @@ class RobustGeometricFeatureExtractor(FeatureExtractor):
         self.quantiles = quantiles
         self.n_angle_pairs = n_angle_pairs
         # One dist quantile + one angle quantile per level, plus centroid_offset
-        # and the four eigenvalue-ratio shape features.
-        self.target_dim = 2 * len(quantiles) + 5
+        # and the two independent eigenvalue-ratio shape features.
+        self.target_dim = 2 * len(quantiles) + 3
+
+    @property
+    def feature_names(self) -> list[str]:
+        """Name per output dimension, matching the hstack order in ``get_features``.
+
+        Derived from ``self.quantiles`` rather than hard-coded, so the names stay
+        correct when the extractor is constructed with a different set of levels.
+
+        Returns:
+            ``2 * len(quantiles) + 3`` names, in column order.
+        """
+        levels = [f"q{q:.0%}" for q in self.quantiles]
+        return (
+            [f"dist_{level}" for level in levels]
+            + ["centroid_offset", "linearity", "sphericity"]
+            + [f"angle_{level}" for level in levels]
+        )
 
     def get_features(self, p: PointCloud) -> NDArray[np.float64]:
         """Compute geometric feature vectors for all points.
@@ -374,10 +432,10 @@ class RobustGeometricFeatureExtractor(FeatureExtractor):
         lam3 = eigvals[:, 0:1]                                              # (N, 1) smallest
         l1 = np.maximum(lam1, eps)
 
+        # Two of the four standard shape ratios. planarity and anisotropy are exact
+        # functions of these two (see the class docstring) and are omitted on purpose.
         linearity  = (lam1 - lam2) / l1                                     # (N, 1)
-        planarity  = (lam2 - lam3) / l1                                     # (N, 1)
         sphericity = lam3 / l1                                              # (N, 1)
-        anisotropy = (lam1 - lam3) / l1                                     # (N, 1)
 
         # --- Pairwise angles between (point-relative) neighbor direction vectors ---
         # Only the sampled pairs are evaluated, so this costs O(n_angle_pairs) per
@@ -394,9 +452,9 @@ class RobustGeometricFeatureExtractor(FeatureExtractor):
 
         return np.hstack([
             dist_q, centroid_offset,
-            linearity, planarity, sphericity, anisotropy,
+            linearity, sphericity,
             angle_q,
-        ]).astype(np.float64)                                               # (N, 5 + 2*len(quantiles))
+        ]).astype(np.float64)                                               # (N, 3 + 2*len(quantiles))
 
 
 class IdentityFeatureExtractor(FeatureExtractor):

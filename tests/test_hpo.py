@@ -106,7 +106,7 @@ def test_build_trimmer_enabled_builds_clustering_trimmer():
     assert isinstance(trimmer.feature_extractor, GeometricFeatureExtractor)
     assert trimmer.feature_extractor.k == 20
     assert trimmer.min_cluster_fraction == pytest.approx(0.1)
-    assert trimmer.clusterer.eps == pytest.approx((2 * 9) ** 0.5 * 0.2)
+    assert trimmer.clusterer.eps == pytest.approx((2 * 7) ** 0.5 * 0.2)
     assert trimmer.clusterer.min_samples == max(2, int(np.log(1000) * 1.5))
 
 

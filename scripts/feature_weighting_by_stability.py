@@ -17,8 +17,11 @@ it has to reach into the matcher's cached, already-normalized features.
 Schemes compared (r_j is the measured correlation at the dropout level under test):
 
   uniform      — baseline, every dimension weighted equally
-  drop_dup     — zero out anisotropy, which is algebraically 1 - sphericity
   drop_eigen   — zero out the eigenvalue-ratio block except sphericity
+
+(A former `drop_dup` scheme zeroed anisotropy as algebraically 1 - sphericity. The
+extractors no longer emit anisotropy or planarity at all, since the four standard
+shape ratios have rank 2, so that scheme is now the baseline.)
   linear_r     — w_j = r_j
   llr          — w_j = sqrt(r_j / (1 - r_j)), the likelihood-ratio-optimal weight
                  for separating true pairs from random pairs when each z-scored
@@ -131,16 +134,11 @@ def build_weight_schemes(
     d = len(correlations)
     r = np.clip(correlations, 0.0, r_clip)
 
-    drop_dup = np.ones(d)
-    drop_dup[names.index("anisotropy")] = 0.0
-
     drop_eigen = np.ones(d)
-    for name in ("anisotropy", "linearity", "planarity"):
-        drop_eigen[names.index(name)] = 0.0
+    drop_eigen[names.index("linearity")] = 0.0
 
     return {
         "uniform": _normalize_rms(np.ones(d)),
-        "drop_dup": _normalize_rms(drop_dup),
         "drop_eigen": _normalize_rms(drop_eigen),
         "linear_r": _normalize_rms(r),
         "llr": _normalize_rms(np.sqrt(r / (1.0 - r))),

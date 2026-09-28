@@ -5,7 +5,7 @@ from point_cloud import PointCloud
 from feature_extractor import GeometricFeatureExtractor
 
 
-N_FEATURES = 9
+N_FEATURES = 7
 
 
 @pytest.fixture
@@ -15,7 +15,7 @@ def cloud() -> PointCloud:
 
 
 def test_output_shape_and_dtype(cloud: PointCloud) -> None:
-    """get_features returns (N, 9) float64."""
+    """get_features returns (N, 7) float64."""
     feats = GeometricFeatureExtractor(k=10).get_features(cloud)
     assert feats.shape == (len(cloud.points), N_FEATURES)
     assert feats.dtype == np.float64
@@ -73,7 +73,7 @@ def test_scale_invariance(cloud: PointCloud) -> None:
 
 
 def test_k_clamped_to_n_minus_one() -> None:
-    """k larger than N-1 must not raise; features are still (N, 9)."""
+    """k larger than N-1 must not raise; features are still (N, 7)."""
     small = PointCloud(np.eye(5, 3))
     feats = GeometricFeatureExtractor(k=100).get_features(small)
     assert feats.shape == (5, N_FEATURES)
