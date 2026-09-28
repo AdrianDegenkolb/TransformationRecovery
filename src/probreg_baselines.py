@@ -91,7 +91,7 @@ class ProbregCPD:
             w:        Weight of the uniform (outlier) distribution component, in [0, 1).
             maxiter:  Maximum number of EM iterations.
             tol:      Termination tolerance on the change in CPD's likelihood criterion.
-            verbose:  Unused internally; present only so experiment_runner._quiet()
+            verbose:  Unused internally; present only so quiet()
                       (which toggles icp.verbose) works unmodified.
         """
         self.w = w
@@ -121,7 +121,7 @@ class ProbregFilterReg:
             w:        Weight of the uniform (outlier) distribution component, in [0, 1).
             maxiter:  Maximum number of EM iterations.
             tol:      Termination tolerance on the change in FilterReg's likelihood criterion.
-            verbose:  Unused internally; present only so experiment_runner._quiet()
+            verbose:  Unused internally; present only so quiet()
                       (which toggles icp.verbose) works unmodified.
         """
         self.w = w
@@ -150,7 +150,7 @@ class ProbregGMMTree:
         Args:
             maxiter:  Maximum number of EM iterations.
             tol:      Termination tolerance on the change in GMMTree's likelihood criterion.
-            verbose:  Unused internally; present only so experiment_runner._quiet()
+            verbose:  Unused internally; present only so quiet()
                       (which toggles icp.verbose) works unmodified.
         """
         self.maxiter = maxiter

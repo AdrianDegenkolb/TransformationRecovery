@@ -134,6 +134,37 @@ def rotation_to_six_d(R: NDArray[np.float64]) -> NDArray[np.float64]:
     return R[:, :2].T.reshape(-1).astype(np.float64)
 
 
+def rotation_with_angle(
+    angle_deg: float,
+    rng: np.random.Generator | None = None,
+) -> NDArray[np.float64]:
+    """Random rotation by an exact angle about a uniformly random axis.
+
+    ``sample_uniform_rotation`` draws the angle too, which is what you want for
+    restarts but not for a sweep: measuring how a method degrades with misalignment
+    needs the misalignment held to a chosen value while everything else varies.
+
+    Args:
+        angle_deg: Rotation magnitude in degrees.
+        rng:       Optional generator for reproducibility.
+
+    Returns:
+        (3, 3) rotation matrix whose geodesic distance from the identity is
+        exactly ``angle_deg``.
+    """
+    rng = rng or np.random.default_rng()
+    axis = rng.normal(size=3)
+    axis /= np.linalg.norm(axis)
+    theta = np.radians(angle_deg)
+    cross = np.array([
+        [0.0, -axis[2], axis[1]],
+        [axis[2], 0.0, -axis[0]],
+        [-axis[1], axis[0], 0.0],
+    ])
+    # Rodrigues' rotation formula.
+    return np.eye(3) + np.sin(theta) * cross + (1.0 - np.cos(theta)) * (cross @ cross)
+
+
 def rotation_angle(R1: NDArray[np.float64], R2: NDArray[np.float64]) -> float:
     """Angular distance between two rotation matrices in degrees.
 

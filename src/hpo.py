@@ -11,14 +11,8 @@ from experiment_runner import fit_multi_seed
 from feature_extractor import FeatureExtractor, GeometricFeatureExtractor, RobustGeometricFeatureExtractor
 from icp import ICP, ICPCallback, MultiStartICP, SigmaAnnealingCallback
 from matcher import GaussianMatcher, Matcher, NearestNeighborMatcher
-from synthetic import CloudStyle
+from synthetic import CloudStyle, PerfectObserver, PointCloudObserver
 from trimmer import ClusteringTrimmer, Trimmer
-
-# Feature dimensionality per extractor, used to size the trimmer's DBSCAN eps
-# via the (2*d)**0.5*0.2 heuristic used throughout the notebooks. Both
-# extractors currently have a fixed dimension (RobustGeometricFeatureExtractor's
-# only varies if `quantiles` is overridden, which HPO doesn't currently tune).
-_FEATURE_EXTRACTOR_DIM: dict[str, int] = {"geometric": 9, "robust": 11}
 
 
 def _build_feature_extractor(name: Literal["geometric", "robust"], k: int) -> FeatureExtractor:
@@ -63,7 +57,7 @@ def _build_matcher(trial: optuna.Trial, max_iter: int) -> tuple[Matcher, list[IC
 
     feature_extractor_name = trial.suggest_categorical("feature_extractor", ["none", "geometric", "robust"])
     if feature_extractor_name != "none":
-        fe_k = trial.suggest_int("fe_k", low=2, high=50)
+        fe_k = trial.suggest_int("fe_k", low=2, high=320, log=True)
         feature_extractor = _build_feature_extractor(cast(Literal["geometric", "robust"], feature_extractor_name), fe_k)
         if matching == "soft":
             feature_mode = cast(Literal["additive", "append"], trial.suggest_categorical("feature_mode", ["additive", "append"]))
@@ -105,7 +99,7 @@ def build_icp_factory(
     Tuned parameters:
         matching:           categorical ['hard', 'soft']
         feature_extractor:  categorical ['none', 'geometric', 'robust']
-        fe_k:               int [2, 50]                        (feature_extractor != 'none')
+        fe_k:               int [2, 320] log                   (feature_extractor != 'none')
         feature_mode:       categorical ['additive', 'append']  (soft + feature_extractor != 'none')
         alpha:              float [0.0, 10.0]                  (feature_mode == 'additive')
         beta:               float [0.0, 10.0]                  (feature_mode == 'append', or hard + feature_extractor != 'none')
@@ -160,13 +154,70 @@ def build_icp_factory(
     return factory
 
 
+def build_single_start_nn_icp_factory(
+    trial: optuna.Trial,
+    max_iter: int,
+    tol: float,
+) -> Callable[[], ICP]:
+    """Suggest hyperparameters for a single-start, feature-augmented NearestNeighborMatcher ICP.
+
+    A deliberately reduced version of `build_icp_factory` for isolating the effect
+    of `beta` — the scale of feature dimensions relative to spatial coordinates in
+    the joint KDTree (see matcher.py). The full search space confounds this: with
+    multi-start enabled, a poor `beta` can be compensated by trying many starting
+    rotations, so the search feels no pressure to raise it.
+
+    Fixed by construction, not suggested:
+        matching = 'hard'        — GaussianMatcher's sigma/anneal/alpha parameters
+                                   would otherwise dominate the search space.
+        use_multistart = False   — the point of the study; a single start is what
+                                   makes `beta` actually matter.
+        feature_extractor != 'none' — with no extractor, `beta` is unused and the
+                                   trial cannot inform the question.
+        trimming                 — handled by the caller (pass trimmer=None to
+                                   evaluate_icp); trimming alters point density and
+                                   therefore feature quality, confounding `beta`.
+
+    Tuned parameters:
+        feature_extractor:  categorical ['geometric', 'robust']
+        fe_k:               int [2, 320] log
+        beta:               float [0.0, 10.0]
+
+    Calling trial.suggest_* is idempotent within a trial, so the returned factory
+    can be called multiple times and will always produce consistent hyperparameter
+    values with fresh instances.
+
+    Args:
+        trial:    Optuna trial for parameter suggestion.
+        max_iter: Fixed ICP max_iter passed to each created instance.
+        tol:      Fixed ICP convergence tolerance.
+
+    Returns:
+        Zero-argument callable that creates a fresh, configured ICP instance.
+    """
+    extractor_name = cast(
+        Literal["geometric", "robust"],
+        trial.suggest_categorical("feature_extractor", ["geometric", "robust"]),
+    )
+    fe_k = trial.suggest_int("fe_k", low=2, high=320, log=True)
+    beta = trial.suggest_float("beta", low=0.0, high=10.0)
+    feature_extractor = _build_feature_extractor(extractor_name, fe_k)
+
+    def factory() -> ICP:
+        # evaluate_icp never reads cloud_history/matching_history.
+        matcher = NearestNeighborMatcher(feature_extractor=feature_extractor, beta=beta)
+        return ICP(matcher=matcher, max_iter=max_iter, tol=tol, record_history=False)
+
+    return factory
+
+
 def build_trimmer(trial: optuna.Trial, n: int) -> Trimmer | None:
     """Suggest whether to apply a ClusteringTrimmer before ICP, and its hyperparameters.
 
     Tuned parameters:
         use_trimmer:          categorical [True, False]
         trimmer_extractor:    categorical ['geometric', 'robust']  (use_trimmer only)
-        trimmer_fe_k:         int [2, 50]                          (use_trimmer only)
+        trimmer_fe_k:         int [2, 320] log                     (use_trimmer only)
         min_cluster_fraction: log-uniform [0.01, 0.3]              (use_trimmer only)
         eps_scaling:          log-uniform [0.1, 0.5]               (use_trimmer only); DBSCAN eps = (2*d)**0.5 * eps_scaling
         min_samples_scaling:  log-uniform [0.5, 2.0]               (use_trimmer only); DBSCAN min_samples = log(n) * min_samples_scaling
@@ -192,11 +243,11 @@ def build_trimmer(trial: optuna.Trial, n: int) -> Trimmer | None:
         Literal["geometric", "robust"],
         trial.suggest_categorical("trimmer_extractor", ["geometric", "robust"]),
     )
-    fe_k = trial.suggest_int("trimmer_fe_k", low=2, high=50)
+    fe_k = trial.suggest_int("trimmer_fe_k", low=2, high=320, log=True)
     extractor = _build_feature_extractor(extractor_name, fe_k)
 
     min_cluster_fraction = trial.suggest_float("min_cluster_fraction", 0.01, 0.3, log=True)
-    d = _FEATURE_EXTRACTOR_DIM[extractor_name]
+    d = extractor.target_dim
     # eps/min_samples were previously fixed constants tuned for one clean-cloud
     # density; exposing their scale factors lets the search correct for point
     # density that shifts under dropout instead of assuming the notebook
@@ -219,13 +270,13 @@ def evaluate_icp(
     seeds: list[int],
     gen_kwargs: dict[str, Any],
     trimmer: Trimmer | None = None,
-    dropout_prob: float = 0.0,
+    observer: PointCloudObserver = PerfectObserver(),
     n_jobs: int = 1,
 ) -> dict[str, float]:
     """Evaluate an ICP configuration over multiple random seeds.
 
     Delegates the actual per-seed looping to `fit_multi_seed`, so trimming and
-    dropout are handled consistently with the rest of the codebase.
+    observation are handled consistently with the rest of the codebase.
 
     Args:
         icp_factory:  Callable returning a fresh ICP/MultiStartICP instance.
@@ -236,10 +287,11 @@ def evaluate_icp(
         seeds:        Random seeds to average over. Passed explicitly (rather than
                       just a count) so callers can use disjoint seed sets for tuning
                       vs. held-out evaluation.
-        gen_kwargs:   Kwargs for SyntheticExperiment.generate (n, noise_std, t_scale, ...).
+        gen_kwargs:   Kwargs for SyntheticExperiment.generate (n, t_scale, ...).
                       Must not contain 'style' or 'seed'.
         trimmer:      Optional trimmer applied to (P, Q) before each ICP call.
-        dropout_prob: Probability of dropping individual points from the observation.
+        observer:     Simulates dropout/noise when observing each experiment's P and Q
+                      (see synthetic.PointCloudObserver). Defaults to a PerfectObserver.
         n_jobs:       Worker processes for parallelizing across seeds. Keep the
                       icp_factory's own MultiStartICP (if any) at n_jobs=1 when
                       using this, since nesting pools oversubscribes CPU cores.
@@ -256,7 +308,7 @@ def evaluate_icp(
     """
     icp = icp_factory()
     result = fit_multi_seed(
-        icp, seeds=seeds, dropout_prob=dropout_prob, verbose=False,
+        icp, seeds=seeds, observer=observer, verbose=False,
         trimmer=trimmer, experiment_kwargs={**gen_kwargs, "style": style},
         n_jobs=n_jobs,
     )
@@ -273,13 +325,33 @@ def evaluate_icp(
     }
 
 
+def _record_trial_metrics(trial: optuna.Trial, metrics: dict[str, float]) -> float:
+    """Store secondary metrics as trial user attributes and return the optimized value.
+
+    Rotation error, translation error, duration, and reliability are recorded for
+    post-hoc inspection only; none of them are optimized directly.
+
+    Args:
+        trial:   Optuna trial to attach user attributes to.
+        metrics: Metrics dictionary as returned by `evaluate_icp`.
+
+    Returns:
+        metrics['mean_true_residual'], the value to be minimized.
+    """
+    trial.set_user_attr("mean_rot_err", metrics["mean_rot_err"])
+    trial.set_user_attr("mean_t_err", metrics["mean_t_err"])
+    trial.set_user_attr("mean_duration_s", metrics["mean_duration_s"])
+    trial.set_user_attr("reliability", metrics["reliability"])
+    return metrics["mean_true_residual"]
+
+
 def make_objective(
     style: CloudStyle,
     seeds: list[int],
     gen_kwargs: dict[str, Any],
     max_iter: int,
     tol: float,
-    dropout_prob: float = 0.0,
+    observer: PointCloudObserver = PerfectObserver(),
     multistart_n_jobs: int = 1,
     n_jobs: int = 1,
 ) -> Callable[[optuna.Trial], float]:
@@ -297,12 +369,14 @@ def make_objective(
     Args:
         style:              Cloud geometry for SyntheticExperiment.generate.
         seeds:              Random seeds to average each trial over.
-        gen_kwargs:         Kwargs for SyntheticExperiment.generate (n, noise_std, t_scale, ...).
+        gen_kwargs:         Kwargs for SyntheticExperiment.generate (n, t_scale, ...).
         max_iter:           Fixed ICP max_iter.
         tol:                Fixed ICP tol.
-        dropout_prob:       Probability of dropping individual points from the observation,
-                            applied identically across all trials so the search optimizes
-                            for this noise regime rather than only the clean case.
+        observer:           Simulates dropout/noise when observing each experiment's P
+                            and Q (see synthetic.PointCloudObserver), applied identically
+                            across all trials so the search optimizes for that observation
+                            regime rather than only the clean case. Defaults to a
+                            PerfectObserver.
         multistart_n_jobs:  Worker processes for MultiStartICP trials. See build_icp_factory.
                             Keep at 1 when n_jobs != 1, since nesting pools
                             oversubscribes CPU cores.
@@ -315,11 +389,58 @@ def make_objective(
     def objective(trial: optuna.Trial) -> float:
         factory = build_icp_factory(trial, max_iter, tol, multistart_n_jobs=multistart_n_jobs)
         trimmer = build_trimmer(trial, n=gen_kwargs.get("n", 2000))
-        metrics = evaluate_icp(factory, style, seeds, gen_kwargs, trimmer=trimmer, dropout_prob=dropout_prob, n_jobs=n_jobs)
-        trial.set_user_attr("mean_rot_err", metrics["mean_rot_err"])
-        trial.set_user_attr("mean_t_err", metrics["mean_t_err"])
-        trial.set_user_attr("mean_duration_s", metrics["mean_duration_s"])
-        trial.set_user_attr("reliability", metrics["reliability"])
-        return metrics["mean_true_residual"]
+        metrics = evaluate_icp(
+            factory, style, seeds, gen_kwargs, trimmer=trimmer,
+            observer=observer, n_jobs=n_jobs,
+        )
+        return _record_trial_metrics(trial, metrics)
+
+    return objective
+
+
+def make_beta_sweep_objective(
+    style: CloudStyle,
+    seeds: list[int],
+    gen_kwargs: dict[str, Any],
+    max_iter: int,
+    tol: float,
+    observer: PointCloudObserver = PerfectObserver(),
+    n_jobs: int = 1,
+) -> Callable[[optuna.Trial], float]:
+    """Create an Optuna objective over the reduced single-start `beta` search space.
+
+    Same objective as `make_objective` (minimize mean true residual) but built on
+    `build_single_start_nn_icp_factory`, and with trimming disabled. See that
+    function for which parameters are fixed and why.
+
+    Note that mean true residual is a suitable objective for a single-start study
+    even though reliability is the quantity of real interest: a catastrophic
+    failure on one seed (rotation error near 180°) inflates the mean enormously,
+    so unreliable configurations are penalized heavily without needing a separate
+    objective term.
+
+    Args:
+        style:        Cloud geometry for SyntheticExperiment.generate.
+        seeds:        Random seeds to average each trial over.
+        gen_kwargs:   Kwargs for SyntheticExperiment.generate (n, t_scale, ...).
+        max_iter:     Fixed ICP max_iter.
+        tol:          Fixed ICP tol.
+        observer:     Simulates dropout/noise when observing each experiment's P and Q
+                      (see synthetic.PointCloudObserver). Both perturb each point's k-NN
+                      neighborhood and therefore its features, so they directly affect
+                      how much a high `beta` can be trusted — run separate studies per
+                      observation regime rather than letting it vary within one.
+        n_jobs:       Worker processes for parallelizing evaluate_icp across seeds.
+
+    Returns:
+        Callable (trial) -> mean_true_residual.
+    """
+    def objective(trial: optuna.Trial) -> float:
+        factory = build_single_start_nn_icp_factory(trial, max_iter, tol)
+        metrics = evaluate_icp(
+            factory, style, seeds, gen_kwargs, trimmer=None,
+            observer=observer, n_jobs=n_jobs,
+        )
+        return _record_trial_metrics(trial, metrics)
 
     return objective

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import Literal
 
@@ -17,16 +18,19 @@ CloudStyle = Literal["random", "clustered", "lattice", "2d-lattice", "muscle-fib
 class SyntheticExperiment:
     """Two rigid transformations of a shared source cloud with ground truth.
 
-    S is transformed twice (with per-point Gaussian noise) to produce
+    S is transformed twice to produce the noiseless ground-truth clouds
     P = T1(S) and Q = T2(S). The ground-truth transformation mapping P to Q
-    is T_gt = T2 ∘ T1⁻¹.
+    is T_gt = T2 ∘ T1⁻¹. Dropout and measurement noise are simulated
+    separately, on demand, by a PointCloudObserver — P and Q themselves stay
+    exact so they can serve as a noise-free reference for evaluating recovered
+    transformations.
 
     Attributes:
         S:    Source point cloud (N, 3).
-        T1:   First random rigid transformation (with noise).
-        T2:   Second random rigid transformation (with noise).
-        P:    T1(S) — first observed cloud.
-        Q:    T2(S) — second observed cloud.
+        T1:   First random rigid transformation.
+        T2:   Second random rigid transformation.
+        P:    T1(S) — first ground-truth cloud.
+        Q:    T2(S) — second ground-truth cloud.
         T_gt: Ground-truth transformation T2 ∘ T1⁻¹ mapping P to Q.
     """
 
@@ -51,52 +55,231 @@ class SyntheticExperiment:
     @staticmethod
     def generate(
         n: int = 2000,
-        noise_std: float = 3.0,
         t_scale: float = 8.0,
         seed: int | None = 42,
         style: CloudStyle = "random",
         jitter_std: float = 0.0,
+        normalize_spacing: bool = True,
     ) -> SyntheticExperiment:
         """Generate a synthetic point cloud experiment with two rigid transformations.
 
         Args:
             n:          Target number of points in the source cloud.
                         For 'lattice' the actual count may differ slightly due to integer grid dims.
-            noise_std:  Per-point Gaussian noise added when applying each transformation.
             t_scale:    Scale of the random translation component.
             seed:       Random seed for reproducibility. Pass None for a random run.
             style:      Shape of the source cloud — 'random', 'clustered', 'lattice', '2d-lattice',
                         or 'muscle-fiber'.
             jitter_std: Std of per-node Gaussian jitter for 'lattice'/'2d-lattice'/'muscle-fiber'
                         styles. Ignored otherwise.
+            normalize_spacing: If True, scale the source cloud to a median point spacing of 1
+                        (see PointCloud.normalize), so that noise, sigma and t_scale are in
+                        units of point spacing and mean the same thing for every style.
 
         Returns:
             SyntheticExperiment with S, T1, T2, P, Q, and T_gt = T2 ∘ T1⁻¹.
+            P and Q are exact (noiseless); use a PointCloudObserver to simulate
+            dropout and measurement noise.
         """
         if seed is not None:
             np.random.seed(seed)
 
         S = PointCloud(_make_cloud(n, style, jitter_std))
-        T1 = RigidTransformation.random(noise_std=noise_std, t_scale=t_scale)
-        T2 = RigidTransformation.random(noise_std=noise_std, t_scale=t_scale)
+        if normalize_spacing:
+            S = S.normalize()
+        T1 = RigidTransformation.random(t_scale=t_scale)
+        T2 = RigidTransformation.random(t_scale=t_scale)
         P = T1.apply(S)
         Q = T2.apply(S)
         T_gt = T2.compose(T1.inverse())
 
         return SyntheticExperiment(S=S, T1=T1, T2=T2, P=P, Q=Q, T_gt=T_gt)
 
-    def observe_point_clouds(self, dropout_prob: float) -> tuple[PointCloud, PointCloud]:
+
+class PointCloudObserver:
+    """Turns an experiment's exact point cloud into a realistic observation of it.
+
+    Applies per-point dropout (points the sensor missed entirely) followed by
+    per-point Gaussian noise (measurement error on the points it did see).
+    Owns its own random generator, so observations are reproducible from `seed`
+    without touching global numpy random state.
+
+    Each `observe` call consumes fresh randomness, so observing two clouds in
+    sequence (e.g. an experiment's P and Q) yields independent dropout masks and
+    noise — as two separate physical measurements would.
+    """
+
+    def __init__(self, seed: int = 42, noise_std: float = 0.0, dropout_prob: float = 0.0) -> None:
         """
-        Returns the point clouds P and Q but omits individual points with probability dropout probability.
+        Args:
+            seed:         Seed for this observer's random generator.
+            noise_std:    Std of the per-point Gaussian noise added to observed points.
+            dropout_prob: Probability of missing any individual point.
+        """
+        self.seed = seed
+        self.noise_std = noise_std
+        self.dropout_prob = dropout_prob
+        self.rng = np.random.default_rng(seed)
+
+    def observe(self, point_cloud: PointCloud) -> PointCloud:
+        """Produce a noisy, incomplete observation of `point_cloud`.
 
         Args:
-            dropout_prob: The probability to miss individual points in the observation
+            point_cloud: The exact PointCloud (N, 3) to observe.
+
         Returns:
-            tuple containing observed and incomplete point clouds P and Q
+            Observed PointCloud (M, 3) with M <= N, dropped points removed and
+            the survivors perturbed by Gaussian noise. The input is not modified.
         """
-        indices_for_P = np.random.choice([True, False], size=len(self.P), replace=True, p=[1 - dropout_prob, dropout_prob])
-        indices_for_Q = np.random.choice([True, False], size=len(self.Q), replace=True, p=[1 - dropout_prob, dropout_prob])
-        return PointCloud(self.P.points[indices_for_P]), PointCloud(self.Q.points[indices_for_Q])
+        points = point_cloud.points
+        if self.dropout_prob > 0:
+            points = points[self.rng.random(len(points)) >= self.dropout_prob]
+        if self.noise_std > 0:
+            points = points + self.rng.normal(0.0, self.noise_std, size=points.shape)
+        return PointCloud(points)
+
+    def reset(self) -> PointCloudObserver:
+        """Return an observer with the same settings and its randomness rewound.
+
+        The complement of ``spawn``. Where spawn yields an *independent* stream, this
+        yields the *same* stream from its beginning, so two callers see identical
+        dropout masks and noise.
+
+        Required whenever several methods are to be compared on the same data. An
+        observer's generator advances with every ``spawn``, so passing one instance to
+        several runs in sequence silently gives each run a different realisation of the
+        degradation — turning a paired comparison into an unpaired one and letting the
+        order methods are evaluated in change which of them looks better.
+
+        Returns:
+            A copy of this observer positioned at the start of its own seed's stream.
+        """
+        child = copy.copy(self)
+        child.rng = np.random.default_rng(self.seed)
+        return child
+
+    def spawn(self) -> PointCloudObserver:
+        """Return an observer with the same settings but an independent RNG stream.
+
+        Required whenever observers cross a process boundary: pickling one
+        observer into several worker processes copies its generator state, so
+        every worker would otherwise replay the identical dropout mask and noise
+        draws. Spawning per experiment also keeps results independent of whether
+        the caller ran sequentially or in parallel.
+
+        Returns:
+            A copy of this observer whose randomness is statistically
+            independent of this one's and of every other spawned child.
+        """
+        child = copy.copy(self)
+        child.rng = self.rng.spawn(1)[0]
+        return child
+
+
+class PerfectObserver(PointCloudObserver):
+    """An idealized observer: sees every point, exactly where it is.
+
+    Equivalent to a PointCloudObserver with no dropout and no noise, so
+    `observe` returns the cloud unchanged. Serves as the default for callers
+    that want the clean case without constructing an observer themselves.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(seed=42, noise_std=0.0, dropout_prob=0.0)
+
+
+def make_correspondence_pair(
+    p: PointCloud,
+    q: PointCloud,
+    dropout_prob: float = 0.0,
+    noise_std: float = 0.0,
+    rng: np.random.Generator | None = None,
+) -> tuple[PointCloud, PointCloud, NDArray[np.int64]]:
+    """Build a partial, shuffled correspondence pair from an index-aligned cloud pair.
+
+    Independently drops points from ``p`` and ``q`` (simulating sensor dropout on
+    each side), perturbs the survivors with independent Gaussian noise, then randomly
+    permutes the surviving target points so that correspondence cannot be read off
+    from point order. Yields realistic partial-overlap, order-agnostic correspondence
+    problems with known ground-truth matches.
+
+    Applies the same two degradations as ``PointCloudObserver`` but additionally
+    tracks which points survived, which is what makes it usable for the
+    feature-extractor metrics in ``error_metrics``: those need to know which row of
+    one cloud corresponds to which row of the other, and dropout destroys the
+    index alignment a ``PointCloudObserver`` output would otherwise be read with.
+
+    Args:
+        p:            Source cloud, index-aligned with q (p[i] <-> q[i]), e.g.
+                      a SyntheticExperiment's P.
+        q:            Target cloud, index-aligned with p, e.g. a
+                      SyntheticExperiment's Q.
+        dropout_prob: Per-point probability of dropping a point, applied
+                      independently to each side.
+        noise_std:    Std of the Gaussian noise added to the surviving points,
+                      drawn independently for each side.
+        rng:          Optional random generator for reproducibility.
+
+    Returns:
+        Tuple (p_obs, q_obs, correspondence):
+            p_obs:          Observed source cloud after dropout and noise.
+            q_obs:          Observed target cloud after dropout, noise and permutation.
+            correspondence: (len(q_obs),) int64 array; correspondence[i] is the
+                             index into p_obs.points of the true match for
+                             q_obs.points[i], or -1 if that target point's
+                             source correspondent was dropped. Note the direction:
+                             target -> source. ``invert_correspondence`` flips it for
+                             consumers that index by source.
+    """
+    rng = rng or np.random.default_rng()
+    n = len(p)
+    if len(q) != n:
+        raise ValueError(f"p and q must be index-aligned (same length), got {len(p)} and {len(q)}")
+
+    keep_p = rng.random(n) >= dropout_prob
+    keep_q = rng.random(n) >= dropout_prob
+
+    p_points = p.points[keep_p]
+    p_obs_index = np.full(n, -1, dtype=np.int64)   # original index -> position in p_obs
+    p_obs_index[keep_p] = np.arange(keep_p.sum())
+
+    q_kept_original_idx = np.flatnonzero(keep_q)
+    q_perm_original_idx = rng.permutation(q_kept_original_idx)
+    q_points = q.points[q_perm_original_idx]
+
+    if noise_std > 0:
+        p_points = p_points + rng.normal(0.0, noise_std, size=p_points.shape)
+        q_points = q_points + rng.normal(0.0, noise_std, size=q_points.shape)
+
+    correspondence = p_obs_index[q_perm_original_idx]
+
+    return PointCloud(p_points), PointCloud(q_points), correspondence
+
+
+def invert_correspondence(
+    correspondence: NDArray[np.int64],
+    n_source: int,
+) -> NDArray[np.int64]:
+    """Flip a target -> source correspondence into a source -> target one.
+
+    ``make_correspondence_pair`` reports, for each target point, which source point
+    it came from. The feature-extractor metrics in ``error_metrics`` index the other
+    way round, by source point. Converting between the two is easy to get subtly
+    wrong, so it lives here rather than being re-derived at each call site.
+
+    Args:
+        correspondence: (M,) index into the source cloud per target point, or -1
+                        where that target point has no counterpart.
+        n_source:       Number of source points, i.e. the length of the result.
+
+    Returns:
+        (n_source,) int64 array giving the target index per source point, or -1
+        where the source point has no counterpart.
+    """
+    inverted = np.full(n_source, -1, dtype=np.int64)
+    matched = correspondence >= 0
+    inverted[correspondence[matched]] = np.flatnonzero(matched)
+    return inverted
 
 
 def _make_cloud(n: int, style: CloudStyle, jitter_std: float = 0.0) -> NDArray[np.float64]:

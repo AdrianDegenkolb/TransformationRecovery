@@ -3,7 +3,14 @@ import pytest
 
 import icp as icp_module
 from algebra_utils import sample_dispersed_rotations, sample_uniform_rotations
-from icp import ICP, MultiStartICP, SigmaAnnealingCallback, _windowed_delta
+from icp import ICP, ICPProgress, MultiStartICP, SigmaAnnealingCallback, _windowed_delta
+
+
+def _progress(iteration: int, residual: float | None = None, delta: float | None = None,
+              spacing: float = 1.0) -> ICPProgress:
+    """Build a progress snapshot for callbacks under test."""
+    return ICPProgress(iteration=iteration, mean_residual=residual, delta=delta,
+                       point_spacing=spacing)
 from point_cloud import PointCloud
 from transformation import RigidTransformation
 
@@ -70,14 +77,14 @@ def test_sigma_annealing_interpolates_from_init_to_final():
     fake_icp = _FakeICP(matcher)
     cb = SigmaAnnealingCallback(sigma_init=4.0, sigma_final=0.5, anneal_steps=5)
 
-    cb.on_iteration_start(0, fake_icp)
+    cb.on_iteration_start(_progress(0), fake_icp)
     assert matcher.sigma == pytest.approx(4.0)
 
-    cb.on_iteration_start(4, fake_icp)
+    cb.on_iteration_start(_progress(4), fake_icp)
     assert matcher.sigma == pytest.approx(0.5)
 
     # Iterations beyond anneal_steps clamp to sigma_final rather than extrapolating.
-    cb.on_iteration_start(100, fake_icp)
+    cb.on_iteration_start(_progress(100), fake_icp)
     assert matcher.sigma == pytest.approx(0.5)
 
 
@@ -91,8 +98,8 @@ def test_sigma_annealing_reads_icp_matcher_at_call_time():
     matcher_b = _FakeMatcher()
     cb = SigmaAnnealingCallback(sigma_init=2.0, sigma_final=1.0, anneal_steps=2)
 
-    cb.on_iteration_start(0, _FakeICP(matcher_a))
-    cb.on_iteration_start(0, _FakeICP(matcher_b))
+    cb.on_iteration_start(_progress(0), _FakeICP(matcher_a))
+    cb.on_iteration_start(_progress(0), _FakeICP(matcher_b))
 
     assert matcher_a.sigma == pytest.approx(2.0)
     assert matcher_b.sigma == pytest.approx(2.0)
@@ -130,6 +137,40 @@ def test_icp_record_history_false_skips_cloud_and_matching_history():
     assert len(result.mean_residuals) == result.n_iterations
 
 
+def test_init_align_centroids_recovers_pure_translation():
+    """Regression test: init_align_centroids=True used to compose the centroid-
+    alignment translation on top of a first-iteration fit that was itself
+    computed on the un-translated cloud (current was never actually shifted
+    by the centroid-alignment step), double-counting the translation.
+    """
+    rng = np.random.default_rng(0)
+    points = rng.uniform(-10, 10, size=(200, 3))
+    t_true = np.array([15.0, -8.0, 5.0])
+    source = PointCloud(points)
+    target = PointCloud(points + t_true)
+
+    result = ICP(init_align_centroids=True, verbose=False, max_iter=50).fit(source, target)
+
+    assert result.transformation.t == pytest.approx(t_true, abs=1e-6)
+
+
+@pytest.mark.parametrize("init_align_centroids", [True, False])
+def test_transform_history_has_exactly_one_entry_per_iteration(init_align_centroids: bool):
+    """Regression test: the centroid pre-alignment used to be appended to
+    transform_history before the loop, giving n_iterations + 1 entries. That
+    broke the parallel-array contract with mean_residuals/deltas, and shifted
+    ICP's per-iteration trajectory one step against the probreg baselines it is
+    plotted with (see visualization.ICPComparisonVisualizer). The pre-alignment
+    is already folded into every accumulated entry, so it needs no entry of its own.
+    """
+    source, target = _small_clouds()
+    result = ICP(max_iter=5, init_align_centroids=init_align_centroids).fit(source, target)
+
+    assert len(result.transform_history) == result.n_iterations
+    assert len(result.mean_residuals) == result.n_iterations
+    assert len(result.deltas) == result.n_iterations
+
+
 def test_multistart_icp_n_jobs_1_runs_without_process_pool(monkeypatch):
     """n_jobs=1 must not fork a ProcessPoolExecutor: some wrapped .fit()
     implementations (e.g. probreg's CPD, which pulls in open3d) initialize native
@@ -148,3 +189,14 @@ def test_multistart_icp_n_jobs_1_runs_without_process_pool(monkeypatch):
     result = multi.fit(source, target)
     assert len(result.all_results) == 3
     assert len(result.transform_history) == result.n_iterations
+
+
+def test_sigma_at_matches_the_sigma_the_callback_sets():
+    """sigma_at is the schedule used offline (e.g. to recompute per-iteration matchings),
+    so it must agree with what on_iteration_start writes into the matcher."""
+    cb = SigmaAnnealingCallback(sigma_init=4.0, sigma_final=0.5, anneal_steps=5)
+    matcher = _FakeMatcher()
+    for i in [0, 2, 4, 100]:
+        cb.on_iteration_start(_progress(i), _FakeICP(matcher))
+        assert cb.sigma_at(i) == pytest.approx(matcher.sigma)
+    assert cb.sigma_at(2) == pytest.approx(np.sqrt(4.0 * 0.5))   # geometric midpoint

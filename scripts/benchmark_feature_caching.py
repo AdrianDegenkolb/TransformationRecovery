@@ -41,9 +41,10 @@ from feature_extractor import (
     FeatureExtractor,
     GeometricFeatureExtractor,
     RobustGeometricFeatureExtractor,
+    zscore_jointly,
 )
 from icp import ICP
-from matcher import Matcher, Matching, _joint_knn
+from matcher import Matcher, Matching, joint_knn
 from point_cloud import PointCloud
 from synthetic import CloudStyle, SyntheticExperiment
 
@@ -130,8 +131,8 @@ class LiveFeatureMatcher(Matcher):
         """
         feat_src_raw = self.extractor.get_features(source)
         feat_tgt_raw = self.extractor.get_features(target)
-        feat_src_z, feat_tgt_z = _joint_zscore(feat_src_raw, feat_tgt_raw)
-        _, nbr_idx = _joint_knn(source.points, target.points, feat_src_z, feat_tgt_z, self.beta, k=1)
+        feat_src_z, feat_tgt_z = zscore_jointly([feat_src_raw, feat_tgt_raw])
+        _, nbr_idx = joint_knn(source.points, target.points, feat_src_z, feat_tgt_z, self.beta, k=1)
         return Matching(source_points=source.points, target_positions=target.points[nbr_idx[:, 0]])
 
 
@@ -189,28 +190,9 @@ class CachedFeatureMatcher(Matcher):
         else:
             feat_src_raw = self.extractor.get_features(source)
 
-        feat_src_z, feat_tgt_z = _joint_zscore(feat_src_raw, feat_tgt_raw)
-        _, nbr_idx = _joint_knn(source.points, target.points, feat_src_z, feat_tgt_z, self.beta, k=1)
+        feat_src_z, feat_tgt_z = zscore_jointly([feat_src_raw, feat_tgt_raw])
+        _, nbr_idx = joint_knn(source.points, target.points, feat_src_z, feat_tgt_z, self.beta, k=1)
         return Matching(source_points=source.points, target_positions=target.points[nbr_idx[:, 0]])
-
-
-def _joint_zscore(
-    feat_src: NDArray[np.float64],
-    feat_tgt: NDArray[np.float64],
-) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """Z-score two feature matrices jointly (mirrors zscored_features).
-
-    Args:
-        feat_src: Raw source features (N, D).
-        feat_tgt: Raw target features (M, D).
-
-    Returns:
-        Tuple (feat_src_z, feat_tgt_z), each z-scored using pooled statistics.
-    """
-    all_raw = np.concatenate([feat_src, feat_tgt], axis=0)
-    mean = all_raw.mean(axis=0)
-    std  = all_raw.std(axis=0) + 1e-8
-    return (feat_src - mean) / std, (feat_tgt - mean) / std
 
 
 # ---------------------------------------------------------------------------

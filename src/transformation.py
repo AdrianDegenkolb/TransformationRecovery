@@ -22,17 +22,14 @@ class Transformation(ABC, metaclass=ABCMeta):
 
 
 class RigidTransformation(Transformation):
-    """f(p) = R @ p + t, optionally with additive Gaussian noise."""
+    """f(p) = R @ p + t."""
 
-    def __init__(self, R: NDArray[np.float64], t: NDArray[np.float64], noise_std: float = 0.0):
+    def __init__(self, R: NDArray[np.float64], t: NDArray[np.float64]):
         self.R = np.asarray(R, dtype=np.float64)          # (3, 3) in SO(3)
         self.t = np.asarray(t, dtype=np.float64)          # (3,)
-        self.noise_std = noise_std
 
     def apply(self, p: PointCloud) -> PointCloud:
         pts = p.points @ self.R.T + self.t
-        if self.noise_std > 0:
-            pts = pts + np.random.randn(*pts.shape) * self.noise_std
         return PointCloud(pts)
 
     @classmethod
@@ -78,13 +75,13 @@ class RigidTransformation(Transformation):
         return cls(R, t)
 
     @classmethod
-    def random(cls, noise_std: float = 0.0, t_scale: float = 5.0) -> RigidTransformation:
+    def random(cls, t_scale: float = 5.0) -> RigidTransformation:
         """Random rotation (via QR) and random translation."""
         Q, _ = np.linalg.qr(np.random.randn(3, 3))
         if np.linalg.det(Q) < 0:
             Q[:, 0] *= -1
         t = np.random.randn(3) * t_scale
-        return cls(Q, t, noise_std)
+        return cls(Q, t)
 
     def inverse(self) -> RigidTransformation:
         """Return the inverse transformation: R⁻¹ = Rᵀ, t⁻¹ = −Rᵀ @ t."""

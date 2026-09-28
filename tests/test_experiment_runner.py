@@ -1,8 +1,9 @@
+import numpy as np
 import pytest
 
-from experiment_runner import MultiSeedSyntheticICPResult, _quiet, fit_multi_seed
+from experiment_runner import MultiSeedSyntheticICPResult, quiet, fit_multi_seed
 from icp import ICP, ICPResult, MultiStartICP
-from synthetic import SyntheticExperiment
+from synthetic import PointCloudObserver, SyntheticExperiment
 from transformation import RigidTransformation
 
 
@@ -52,7 +53,7 @@ def test_mean_closest_point_residuals_reuses_cached_residuals():
 
 def test_quiet_restores_verbose_after_normal_exit():
     icp = ICP(verbose=True)
-    with _quiet(icp):
+    with quiet(icp):
         assert icp.verbose is False
     assert icp.verbose is True
 
@@ -60,7 +61,7 @@ def test_quiet_restores_verbose_after_normal_exit():
 def test_quiet_restores_verbose_after_exception():
     icp = ICP(verbose=True)
     with pytest.raises(RuntimeError):
-        with _quiet(icp):
+        with quiet(icp):
             assert icp.verbose is False
             raise RuntimeError("boom")
     assert icp.verbose is True
@@ -69,7 +70,7 @@ def test_quiet_restores_verbose_after_exception():
 def test_quiet_also_silences_wrapped_icp_for_multistart():
     inner = ICP(verbose=True)
     multi = MultiStartICP(icp=inner, verbose=True)
-    with _quiet(multi):
+    with quiet(multi):
         assert multi.verbose is False
         assert inner.verbose is False
     assert multi.verbose is True
@@ -78,9 +79,35 @@ def test_quiet_also_silences_wrapped_icp_for_multistart():
 
 def test_fit_multi_seed_runs_and_restores_verbose():
     icp = ICP(max_iter=3, verbose=True)
-    result = fit_multi_seed(icp, seeds=[0, 1], verbose=False, experiment_kwargs={'n': 15, 'noise_std': 0.0})
+    result = fit_multi_seed(icp, seeds=[0, 1], verbose=False, experiment_kwargs={'n': 15})
     assert set(result.r.keys()) == {0, 1}
     assert icp.verbose is True
+
+
+def test_fit_multi_seed_observer_degrades_only_the_fitted_copies():
+    """The observer must not touch exp.P/exp.Q, which true_residuals relies on."""
+    icp = ICP(max_iter=3, verbose=False)
+    observer = PointCloudObserver(seed=0, noise_std=0.5, dropout_prob=0.2)
+    result = fit_multi_seed(
+        icp, seeds=[0], observer=observer, verbose=False, experiment_kwargs={'n': 40}
+    )
+
+    exp, _ = result[0]
+    np.testing.assert_allclose(exp.P.points, exp.T1.apply(exp.S).points)
+    np.testing.assert_allclose(exp.Q.points, exp.T2.apply(exp.S).points)
+
+
+def test_fit_multi_seed_observes_each_seed_independently():
+    """Every seed must get its own observation draw, not a replay of seed 0's."""
+    icp = ICP(max_iter=1, verbose=False)
+    observer = PointCloudObserver(seed=0, dropout_prob=0.5)
+    result = fit_multi_seed(
+        icp, seeds=[0, 1, 2], observer=observer, verbose=False, experiment_kwargs={'n': 200}
+    )
+
+    # Same-sized clouds observed through identical RNG state would drop identically.
+    kept = [len(r.cloud_history[0]) for r in result.results]
+    assert len(set(kept)) > 1
 
 
 class _ExplodingTrimmer:
@@ -93,3 +120,19 @@ def test_fit_multi_seed_restores_verbose_on_exception():
     with pytest.raises(RuntimeError):
         fit_multi_seed(icp, seeds=[0], verbose=False, trimmer=_ExplodingTrimmer(), experiment_kwargs={'n': 15})
     assert icp.verbose is True
+
+
+def test_observer_reset_rewinds_while_spawn_diverges() -> None:
+    """Comparing methods needs identical data; reset gives it, spawn deliberately does not."""
+    from point_cloud import PointCloud
+
+    cloud = PointCloud(np.random.default_rng(0).uniform(-5, 5, size=(200, 3)))
+    observer = PointCloudObserver(seed=7, noise_std=0.1, dropout_prob=0.2)
+
+    first = observer.reset().observe(cloud)
+    observer.spawn()  # advance the parent's generator, as fit_multi_seed does
+    second = observer.reset().observe(cloud)
+    np.testing.assert_allclose(first.points, second.points)
+
+    a, b = observer.spawn().observe(cloud), observer.spawn().observe(cloud)
+    assert a.points.shape != b.points.shape or not np.allclose(a.points, b.points)
